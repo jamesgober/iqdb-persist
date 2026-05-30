@@ -1,0 +1,93 @@
+# ██████╗ ███████╗██████╗ ███████╗
+# ██╔══██╗██╔════╝██╔══██╗██╔════╝
+# ██████╔╝█████╗  ██████╔╝███████╗
+# ██╔══██╗██╔══╝  ██╔═══╝ ╚════██║
+# ██║  ██║███████╗██║     ███████║
+# ╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝
+#╔═══════════════════════════════╗
+#║ Rust Efficiency & Performance ║
+#╚═══════════════════════════════╝
+[package]
+name    = "iqdb-persist"
+version = "0.1.0"
+
+# Minimum Supported Rust Version (MSRV)
+rust-version = "1.85"
+edition = "2024"
+
+# License
+license = "Apache-2.0 OR MIT"
+
+# Readme
+readme = "README.md"
+
+# Description
+description = "Disk persistence, WAL, and crash recovery for iQDB indexes - part of the iQDB family."
+
+# Keywords (5 max)
+keywords = [
+    "persistence",
+    "wal",
+    "vector-database",
+    "recovery",
+    "iqdb"
+]
+
+# Categories
+categories = [
+    "database-implementations",
+    "filesystem"
+]
+
+# Links
+homepage      = "https://github.com/jamesgober/iqdb-persist"
+repository    = "https://github.com/jamesgober/iqdb-persist"
+documentation = "https://docs.rs/iqdb-persist"
+
+# Authors
+authors = [
+    "James Gober <me@jamesgober.com>"
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "iqdb_persist"
+path = "src/lib.rs"
+
+
+# FEATURE FLAGS
+# #################################
+[features]
+default = ["std"]
+# Standard library.
+std = []
+# Serialization support.
+serde = ["dep:serde"]
+
+
+# DEPENDENCIES
+# #################################
+[dependencies]
+serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
+
+
+# DEV DEPENDENCIES
+# #################################
+[dev-dependencies]
+proptest = "1"
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+
+# RELEASE PROFILE
+# #################################
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
