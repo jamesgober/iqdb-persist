@@ -73,7 +73,7 @@ Tier 1 covers the entire common case in a handful of calls, with no builder and 
 
 ## 8. Project-specific invariants
 
-Stack: Rust edition 2024, MSRV 1.85. Errors via `error-forge`. Tests via `cargo test` + `criterion` + `loom` + `proptest`.
+Stack: Rust edition 2024, MSRV 1.87. Errors via `error-forge`. Tests via `cargo test` + `criterion` + `loom` + `proptest`.
 
 - All saves are atomic via temp-then-rename; a partial write must never corrupt existing data.
 - WAL replay is the recovery contract: every mutation is logged before it is applied in memory.
