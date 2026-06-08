@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "iqdb-persist"
-version = "0.2.0"
+version = "0.3.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.87"
@@ -95,13 +95,22 @@ serde       = { version = "1", optional = true, features = ["derive"] }
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
-# Property-based tests for header round-trip invariants.
+# Property-based tests for header + WAL round-trip invariants.
 proptest = "1"
-# Temp dirs / files for atomic-save and CRC-mismatch integration tests.
+# Temp dirs / files for atomic-save, CRC-mismatch, and WAL integration tests.
 tempfile = "3"
+# WAL append / replay hot-path benchmarks.
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
+
+
+# BENCHMARKS
+# #################################
+[[bench]]
+name    = "wal_bench"
+harness = false
 
 
 # RELEASE PROFILE

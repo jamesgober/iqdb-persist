@@ -31,8 +31,8 @@ use iqdb_types::{DistanceMetric, IqdbError};
 /// let err = PersistError::ChecksumMismatch { expected: 0xDEADBEEF, computed: 0x00000000 };
 /// assert!(err.to_string().contains("checksum mismatch"));
 ///
-/// let unsup = PersistError::Unsupported { feature: "wal_enabled", available_in: "v0.3" };
-/// assert!(unsup.to_string().contains("v0.3"));
+/// let unsup = PersistError::Unsupported { feature: "compression", available_in: "v0.4" };
+/// assert!(unsup.to_string().contains("v0.4"));
 /// ```
 #[non_exhaustive]
 #[derive(Debug)]
@@ -251,19 +251,19 @@ impl From<IqdbError> for PersistError {
 /// # Examples
 ///
 /// ```
-/// use iqdb_persist::{PersistError, Result};
+/// use iqdb_persist::{Compression, PersistError, Result};
 ///
-/// fn need_wal_off(wal_enabled: bool) -> Result<()> {
-///     if wal_enabled {
+/// fn need_uncompressed(compression: Compression) -> Result<()> {
+///     if !matches!(compression, Compression::None) {
 ///         return Err(PersistError::Unsupported {
-///             feature: "wal_enabled",
-///             available_in: "v0.3",
+///             feature: "compression",
+///             available_in: "v0.4",
 ///         });
 ///     }
 ///     Ok(())
 /// }
 ///
-/// assert!(need_wal_off(true).is_err());
-/// assert!(need_wal_off(false).is_ok());
+/// assert!(need_uncompressed(Compression::Lz4).is_err());
+/// assert!(need_uncompressed(Compression::None).is_ok());
 /// ```
 pub type Result<T> = core::result::Result<T, PersistError>;

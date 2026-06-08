@@ -23,10 +23,10 @@ Exit criteria:
 
 ---
 
-## v0.3.0 -- WAL append + replay + crash recovery
+## v0.3.0 -- WAL append + replay + crash recovery (DONE)
 
 Exit criteria:
-- [ ] New surface tested and benchmarked where it is a hot path.
+- [x] New surface tested and benchmarked where it is a hot path.
 
 ---
 

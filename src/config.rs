@@ -1,20 +1,22 @@
 //! Public configuration types for the persistence layer.
 //!
 //! [`PersistConfig`] is what a caller hands to [`crate::PersistedIndex`].
-//! v0.2 implements the **snapshot** subset of the surface: file path,
-//! fsync policy, and `Compression::None`. The WAL knob and the
-//! compression variants are present so the v0.3 / v0.4 wiring lands
-//! without an API break; v0.2 rejects them at construction with a clear
-//! [`crate::PersistError::Unsupported`] rather than panicking or
-//! silently no-oping.
+//! As of v0.3 it implements the snapshot subset (path, fsync policy) plus
+//! the **write-ahead log** (`wal_enabled`). The compression variants are
+//! present so the v0.4 wiring lands without an API break; until then they
+//! are rejected at construction with a clear
+//! [`crate::PersistError::Unsupported`] rather than panicking or silently
+//! no-oping.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 /// How aggressively the persistence layer fsyncs to durable storage.
 ///
-/// v0.2 honors `Always` and `Never` on snapshot save. `Periodic` is
-/// WAL-specific and is treated as `Always` for snapshot writes in v0.2.
+/// Snapshot saves honor `Always` and `Never` (and treat `Periodic` as
+/// `Always`, since a snapshot is a single write). For WAL appends,
+/// `Periodic(interval)` `fsync`s no more than once per `interval`,
+/// trading a bounded window of un-`fsync`ed tail records for throughput.
 ///
 /// # Examples
 ///
@@ -31,7 +33,7 @@ use std::time::Duration;
 pub enum FsyncPolicy {
     /// fsync every write.
     Always,
-    /// fsync no more often than this interval (WAL-specific in v0.3+).
+    /// fsync no more often than this interval (governs WAL appends).
     Periodic(Duration),
     /// Never fsync. Fastest, weakest durability — appropriate for tests
     /// and tmpfs-backed paths only.
@@ -92,9 +94,11 @@ pub enum Compression {
 pub struct PersistConfig {
     /// Path to the snapshot file on disk.
     pub path: PathBuf,
-    /// Whether the WAL is enabled. v0.2 rejects `true` with
-    /// [`crate::PersistError::Unsupported`]; the API is in place for
-    /// v0.3.
+    /// Whether the write-ahead log is enabled (v0.3+). When `true`,
+    /// [`crate::PersistedIndex::insert`] / `delete` log every mutation
+    /// before applying it, [`crate::PersistedIndex::load`] replays the log
+    /// onto the snapshot, and [`crate::PersistedIndex::checkpoint`]
+    /// compacts the log into a fresh snapshot.
     pub wal_enabled: bool,
     /// How aggressively to fsync.
     pub fsync_policy: FsyncPolicy,

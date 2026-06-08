@@ -1,6 +1,6 @@
 # iqdb-persist &mdash; API Reference
 
-> Complete reference for every public item in `iqdb-persist` v0.2.0, with
+> Complete reference for every public item in `iqdb-persist` v0.3.0, with
 > descriptions, parameters, errors, and runnable examples.
 
 `iqdb-persist` is the on-disk persistence layer of the iQDB vector
@@ -8,7 +8,10 @@ database. It adds durable snapshot **save** and **load** to any index that
 implements [`iqdb_index::Index`], wrapped behind a small framing layer
 (versioned file header + CRC32 integrity check) and an atomic write
 (temp file + `fsync` + rename + directory `fsync`). An interrupted write
-never corrupts an existing good file.
+never corrupts an existing good file. With the optional **write-ahead log**
+enabled, mutations are logged and `fsync`ed before they are applied in
+memory and replayed onto the snapshot on load, so an acknowledged
+`insert` / `delete` survives a crash.
 
 ---
 
@@ -21,7 +24,8 @@ never corrupts an existing good file.
   - [`Persistable`](#persistable)
   - [`PersistedIndex` — construction](#persistedindex--construction)
   - [`PersistedIndex` — accessors](#persistedindex--accessors)
-  - [`PersistedIndex` — save](#persistedindex--save)
+  - [`PersistedIndex` — mutation (WAL)](#persistedindex--mutation-wal)
+  - [`PersistedIndex` — save and checkpoint](#persistedindex--save-and-checkpoint)
   - [`PersistConfig`](#persistconfig)
   - [`FsyncPolicy`](#fsyncpolicy)
   - [`Compression`](#compression)
@@ -32,6 +36,7 @@ never corrupts an existing good file.
   - [`VERSION`](#version)
 - **[Errors](#errors)**
 - **[On-disk format](#on-disk-format)**
+- **[Write-ahead log](#write-ahead-log)**
 - **[Durability and atomicity](#durability-and-atomicity)**
 - **[Feature flags](#feature-flags)**
 - **[Notes](#notes)**
@@ -42,16 +47,17 @@ never corrupts an existing good file.
 
 ```toml
 [dependencies]
-iqdb-persist = "0.2"
+iqdb-persist = "0.3"
 ```
 
-`iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError` —
-from `iqdb-types`, and the `Index` / `IndexCore` traits the persisted index
-is generic over from `iqdb-index`. A typical consumer depends on all three:
+`iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError`,
+`VectorId`, `Metadata` — from `iqdb-types`, and the `Index` / `IndexCore`
+traits the persisted index is generic over from `iqdb-index`. A typical
+consumer depends on all three:
 
 ```toml
 [dependencies]
-iqdb-persist = "0.2"
+iqdb-persist = "0.3"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -65,9 +71,13 @@ feature is opt-in (see [Feature flags](#feature-flags)).
 
 - **Tier 1 — the lazy path.** [`PersistConfig::new`](#persistconfig) plus
   [`PersistedIndex::open_with`](#persistedindex--construction),
-  [`PersistedIndex::save`](#persistedindex--save), and
+  [`PersistedIndex::save`](#persistedindex--save-and-checkpoint), and
   [`PersistedIndex::load`](#persistedindex--construction) cover the whole
-  common case: wrap an index, save it, load it back.
+  common case: wrap an index, save it, load it back. With the WAL on,
+  [`insert`](#persistedindex--mutation-wal) /
+  [`delete`](#persistedindex--mutation-wal) /
+  [`checkpoint`](#persistedindex--save-and-checkpoint) add durable,
+  crash-recoverable mutation.
 - **Tier 2 — the configured path.** The [`PersistConfig`](#persistconfig)
   fields — [`fsync_policy`](#fsyncpolicy), [`compression`](#compression),
   `wal_enabled` — tune durability and on-disk size.
@@ -293,9 +303,14 @@ impl<I: Index + Persistable> PersistedIndex<I> {
 ```
 
 - **`index()`** — borrow the wrapped index for queries.
-- **`index_mut()`** — borrow it mutably for inserts / deletes / flush. The
-  on-disk file is **not** updated until you call
-  [`save`](#persistedindex--save) again.
+- **`index_mut()`** — borrow it mutably for direct inserts / deletes /
+  flush. **WAL note:** mutations through this borrow **bypass the WAL** —
+  they are not logged and will not survive a crash until the next
+  [`checkpoint`](#persistedindex--save-and-checkpoint). In WAL mode prefer
+  [`insert`](#persistedindex--mutation-wal) /
+  [`delete`](#persistedindex--mutation-wal). The on-disk snapshot is **not**
+  updated until you call [`save`](#persistedindex--save-and-checkpoint) or
+  [`checkpoint`](#persistedindex--save-and-checkpoint).
 - **`config()`** — the [`PersistConfig`](#persistconfig) this wrapper was
   constructed with.
 
@@ -327,30 +342,106 @@ assert_eq!(wrapped.config().path.file_name().unwrap(), "snap.iqdb");
 
 ---
 
-### `PersistedIndex` — save
+### `PersistedIndex` — mutation (WAL)
+
+```rust
+impl<I: Index + Persistable> PersistedIndex<I> {
+    pub fn insert(&mut self, id: VectorId, vector: Arc<[f32]>, meta: Option<Metadata>) -> Result<()>;
+    pub fn delete(&mut self, id: &VectorId) -> Result<()>;
+}
+```
+
+The durable mutation path. With the WAL enabled
+([`PersistConfig::wal_enabled`](#persistconfig)), each call **logs and
+`fsync`s the operation before applying it** in memory, so an acknowledged
+mutation survives a crash and is restored on the next
+[`load`](#persistedindex--construction). In snapshot-only mode they apply
+to memory directly (durability then comes from the next
+[`save`](#persistedindex--save-and-checkpoint)).
+
+If the in-memory apply is rejected (for example a duplicate id, or an
+absent id on delete), the just-logged record is rolled back, so the WAL
+never drifts out of step with the index.
+
+- `id` / `vector` / `meta`: the mutation, the same triple
+  [`IndexCore::insert`](https://docs.rs/iqdb-index) takes.
+- **Errors:** [`PersistError::Io`](#errors) if the WAL append or `fsync`
+  fails; [`PersistError::IndexBuild`](#errors) if the index rejects the
+  mutation; [`PersistError::InvalidPayload`](#errors) if a vector length
+  does not fit in `u32`.
+
+```rust
+# use std::sync::Arc;
+# use iqdb_persist::{PersistConfig, PersistError, PersistedIndex, Persistable, Result};
+# use iqdb_index::{Index, IndexCore, IndexStats};
+# use iqdb_types::{DistanceMetric, Hit, Metadata, Result as IqdbResult, SearchParams, VectorId};
+# use std::io::{Read, Write};
+# struct Idx { dim: usize, n: usize }
+# impl IndexCore for Idx {
+# fn insert(&mut self,_:VectorId,_:Arc<[f32]>,_:Option<Metadata>)->IqdbResult<()>{self.n+=1;Ok(())}
+# fn delete(&mut self,_:&VectorId)->IqdbResult<()>{Ok(())}
+# fn search(&self,_:&[f32],_:&SearchParams)->IqdbResult<Vec<Hit>>{Ok(Vec::new())}
+# fn len(&self)->usize{self.n} fn dim(&self)->usize{self.dim} fn metric(&self)->DistanceMetric{DistanceMetric::Cosine}
+# fn flush(&mut self)->IqdbResult<()>{Ok(())}
+# fn stats(&self)->IndexStats{IndexStats{index_type:"idx",..IndexStats::default()}}
+# }
+# impl Index for Idx { type Config=(); fn new(dim:usize,_:DistanceMetric,_:())->IqdbResult<Self>{Ok(Self{dim,n:0})} }
+# impl Persistable for Idx { const INDEX_TYPE:&'static str="idx";
+# fn save_to(&self,w:&mut dyn Write)->Result<()>{let io=|s|PersistError::Io{path:std::path::PathBuf::new(),source:s};
+#   w.write_all(&(self.dim as u64).to_le_bytes()).map_err(io)?; w.write_all(&(self.n as u64).to_le_bytes()).map_err(io)?; Ok(())}
+# fn load_from(r:&mut dyn Read)->Result<Self>{let io=|s|PersistError::Io{path:std::path::PathBuf::new(),source:s};
+#   let mut b=[0u8;8]; r.read_exact(&mut b).map_err(io)?; let dim=u64::from_le_bytes(b) as usize;
+#   r.read_exact(&mut b).map_err(io)?; let n=u64::from_le_bytes(b) as usize; Ok(Self{dim,n})} }
+# fn main() -> Result<()> {
+let path = std::env::temp_dir().join("wal-doc.iqdb");
+let mut cfg = PersistConfig::new(&path);
+cfg.wal_enabled = true;
+
+let mut db = PersistedIndex::open_with(Idx::new(4, DistanceMetric::Cosine, ()).unwrap(), cfg.clone())?;
+db.insert(VectorId::from(1u64), Arc::<[f32]>::from(&[0.0; 4][..]), None)?; // logged, then applied
+db.checkpoint()?;                                                          // fold WAL into a snapshot
+
+# std::fs::remove_file(&path).ok();
+# let mut wp = path.clone().into_os_string(); wp.push(".wal"); std::fs::remove_file(wp).ok();
+# Ok(())
+# }
+```
+
+---
+
+### `PersistedIndex` — save and checkpoint
 
 ```rust
 impl<I: Index + Persistable> PersistedIndex<I> {
     pub fn save(&self) -> Result<()>;
+    pub fn checkpoint(&mut self) -> Result<()>;
 }
 ```
 
-Write the current state of the wrapped index to `self.config.path`
-**atomically**. The sequence is: serialize the payload via
-[`Persistable::save_to`](#persistable) into a buffer, compute its CRC32,
-prepend the [`FileHeader`](#fileheader), then hand the framed bytes to the
-storage substrate, which writes a temp file, `fsync`s it, renames it over
-the target, and (on POSIX) `fsync`s the parent directory. See
-[Durability and atomicity](#durability-and-atomicity).
+**`save()`** writes the current state to `self.config.path` **atomically**:
+serialize the payload via [`Persistable::save_to`](#persistable), compute
+its CRC32, prepend the [`FileHeader`](#fileheader), then hand the framed
+bytes to the storage substrate, which writes a temp file, `fsync`s it,
+renames it over the target, and (on POSIX) `fsync`s the parent directory.
+See [Durability and atomicity](#durability-and-atomicity).
+
+**`checkpoint()`** writes a fresh snapshot **and** truncates the WAL back
+to empty — the WAL-mode compaction operation. After a checkpoint the
+snapshot alone captures the full state, so the log can be reset; this
+bounds WAL growth and prevents a later [`load`](#persistedindex--construction)
+from double-counting mutations. In snapshot-only mode it is equivalent to
+`save`. **In WAL mode use `checkpoint`, not bare `save`:** `save` alone
+leaves the WAL in place, so the next `load` would replay logged mutations
+on top of a snapshot that already contains them.
 
 - **Errors:** [`PersistError::Io`](#errors) if the temp write, rename, or
-  directory `fsync` fails; any error from
-  [`Persistable::save_to`](#persistable); or
+  `fsync` fails (and, for `checkpoint`, if truncating the WAL fails); any
+  error from [`Persistable::save_to`](#persistable);
   [`PersistError::InvalidPayload`](#errors) if a `usize` field does not fit
   in `u64`.
 
-The method is instrumented with a `tracing` span at `debug` level carrying
-the path, index type, and vector count.
+Both go through a snapshot writer instrumented with a `tracing` span at
+`debug` level carrying the path, index type, and vector count.
 
 ---
 
@@ -372,9 +463,14 @@ impl Default for PersistConfig { /* ... */ }
 
 Configuration handed to [`PersistedIndex`](#persistedindex--construction).
 
-- **`path`** — the snapshot file on disk.
-- **`wal_enabled`** — reserved for v0.3. `true` is rejected at construction
-  with [`PersistError::Unsupported`](#errors) in v0.2.
+- **`path`** — the snapshot file on disk. The WAL lives beside it at
+  `path` + `.wal`.
+- **`wal_enabled`** — turn on the write-ahead log (v0.3+). When `true`,
+  [`open_with`](#persistedindex--construction) writes an initial snapshot
+  and opens a fresh WAL; [`insert`](#persistedindex--mutation-wal) /
+  [`delete`](#persistedindex--mutation-wal) log before applying;
+  [`load`](#persistedindex--construction) replays the log;
+  [`checkpoint`](#persistedindex--save-and-checkpoint) compacts it.
 - **`fsync_policy`** — how aggressively to flush; see
   [`FsyncPolicy`](#fsyncpolicy).
 - **`compression`** — payload compression; see
@@ -651,10 +747,53 @@ header cannot trigger a giant allocation.
 
 ---
 
+## Write-ahead log
+
+When [`PersistConfig::wal_enabled`](#persistconfig) is set, mutations are
+recorded in a log beside the snapshot (`path` + `.wal`) so they survive a
+crash between checkpoints. The log is a 12-byte header followed by
+self-checked frames:
+
+```text
+header:  8  magic ("IQDBWAL\0")  +  4  version (u32 LE)
+frame:   4  record length L (u32 LE)
+         4  crc32 of the record (u32 LE)
+         L  record body
+record:  op (u8)  1 = insert | 2 = delete
+  insert: vector_id, vec_len (u32 LE), vec_len × f32 LE, has_meta (u8),
+          [n_entries (u32 LE), (key_len u32, key utf8, value)…]
+  delete: vector_id
+vector_id: kind (u8) 0 U64(u64 LE) | 1 Bytes(len u64 LE + bytes)
+value:     tag (u8) 0 String | 1 Int(i64) | 2 Float(f64 bits) | 3 Bool | 4 Null
+```
+
+**Lifecycle.** [`open_with`](#persistedindex--construction) (WAL mode)
+writes a base snapshot and a fresh empty log.
+[`insert`](#persistedindex--mutation-wal) /
+[`delete`](#persistedindex--mutation-wal) append a frame and `fsync` per
+[`FsyncPolicy`](#fsyncpolicy) **before** touching memory.
+[`checkpoint`](#persistedindex--save-and-checkpoint) writes a new snapshot
+and truncates the log. [`load`](#persistedindex--construction) reconstructs
+the snapshot, then replays every committed frame onto it.
+
+**Crash safety.** Each frame carries its own length and CRC32. A crash
+mid-append leaves a **torn tail** — a truncated or mis-checksummed final
+frame — which replay detects and discards: that mutation was never
+acknowledged, so dropping it is correct. A frame that fails its CRC32 but
+sits before intact frames stops replay there. A frame that passes its CRC32
+yet does not decode is a genuine corruption and surfaces as
+[`PersistError::InvalidPayload`](#errors).
+
+**Rollback.** `insert` / `delete` log before applying; if the in-memory
+apply is then rejected, the just-written frame is truncated away, so the
+log never contains a mutation the index does not.
+
+---
+
 ## Durability and atomicity
 
-[`PersistedIndex::save`](#persistedindex--save) never writes the target
-file in place. The internal storage substrate implements:
+[`PersistedIndex::save`](#persistedindex--save-and-checkpoint) never writes
+the target file in place. The internal storage substrate implements:
 
 1. **Write a temp file** next to the target (`create_new`, so a stale temp
    never silently wins).
@@ -666,8 +805,9 @@ file in place. The internal storage substrate implements:
    (POSIX only — see below).
 
 If any step fails, the temp file is removed and the original target is left
-**byte-for-byte intact**. This is the v0.2 recovery contract; full WAL
-replay lands in v0.3.
+**byte-for-byte intact**. This protects the snapshot; the
+[write-ahead log](#write-ahead-log) covers the mutations made between
+snapshots.
 
 **Platform note.** The directory-`fsync` step is POSIX-specific. On
 Linux/macOS it flushes the parent directory inode so the rename survives a
@@ -696,10 +836,10 @@ atomic-rename byte sequence is identical on both platforms.
 - **Payload-only impls.** A `Persistable` impl writes only the index's own
   bytes; framing (header + CRC32 + atomic write) is centralized here so it
   stays uniform across every index implementation.
-- **Out of scope for v0.2:** WAL append/replay (v0.3), crash recovery
-  beyond atomic-snapshot integrity (v0.3), Zstd/LZ4 compression (v0.4),
-  and the external `storage-io` substrate (v0.5+). The `PersistConfig`
-  knobs for these already exist and reject cleanly until then.
+- **Out of scope as of v0.3:** Zstd/LZ4 compression (v0.4) and the external
+  `storage-io` substrate (v0.5+). The `compression` knob already exists and
+  rejects cleanly until then. The WAL appends through its own `std::fs`
+  handle today; it routes through `storage-io` when that lands.
 
 ---
 

@@ -41,6 +41,7 @@
 - **Atomic snapshot save/load** &mdash; write-to-temp + `fsync` + atomic rename + directory `fsync`; an interrupted write never corrupts an existing good file.
 - **Versioned header** &mdash; magic bytes, format version, index-type tag, dim, metric, vector count. All sizes are fixed-width little-endian `u64`, so a file is portable across 32- and 64-bit hosts.
 - **CRC32 integrity** &mdash; computed over the payload; a single-bit flip surfaces as `ChecksumMismatch` on load, never a panic or a silently-wrong result.
+- **Write-ahead log & crash recovery** &mdash; with `wal_enabled`, every `insert` / `delete` is logged and `fsync`ed *before* it touches memory, then replayed onto the snapshot on `load`. A crash mid-append leaves a torn tail that recovery detects and discards.
 - **Generic over the index** &mdash; `PersistedIndex<I: Index + Persistable>` wraps any concrete index; the framing lives here, the payload bytes live in the index's `Persistable` impl.
 
 <br>
@@ -49,7 +50,7 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.2"
+iqdb-persist = "0.3"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -73,6 +74,18 @@ let restored: PersistedIndex<MyIndex> = PersistedIndex::load(cfg)?;
 let index = restored.index();
 ```
 
+For durable, crash-recoverable mutation, set `cfg.wal_enabled = true` and
+mutate through the wrapper — each op is logged before it is applied, and
+`checkpoint()` folds the log back into a fresh snapshot:
+
+```rust
+let mut db = PersistedIndex::open_with(my_index, cfg.clone())?; // writes base snapshot + opens WAL
+db.insert(id, vector, metadata)?;   // logged + fsynced, then applied
+db.delete(&other_id)?;
+db.checkpoint()?;                    // snapshot the state, truncate the WAL
+// after a crash: PersistedIndex::load(cfg) replays the WAL onto the snapshot
+```
+
 An index opts in by implementing the two-method `Persistable` trait. A
 complete, runnable version lives in
 [`examples/save_and_load.rs`](./examples/save_and_load.rs) &mdash; run it
@@ -83,7 +96,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v0.2.0</code>: atomic snapshot save/load, the versioned header, and CRC32 integrity are implemented and tested. WAL append/replay (v0.3), Zstd/LZ4 compression (v0.4), and the external `storage-io` substrate (v0.5+) land in later phases per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>. The `PersistConfig` knobs for those features already exist and reject cleanly (`PersistError::Unsupported`) until they ship.
+This is <code>v0.3.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2) and the write-ahead log with replay and crash recovery (v0.3) are implemented and tested. Zstd/LZ4 compression (v0.4) and the external `storage-io` substrate (v0.5+) land in later phases per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>. The `compression` knob already exists and rejects cleanly (`PersistError::Unsupported`) until it ships.
 
 <hr>
 <br>
@@ -95,7 +108,7 @@ This is <code>v0.2.0</code>: atomic snapshot save/load, the versioned header, an
 - `iqdb-types` &mdash; core vocabulary (`DistanceMetric`, `IqdbError`)
 - `iqdb-index` &mdash; the `Index` / `IndexCore` traits it wraps as persistable
 
-All file I/O goes through a tiny internal `Storage` seam so the future `storage-io` substrate (the `fsys-rs` rename) can drop in unchanged; v0.2 ships one impl over `std::fs`.
+Snapshot file I/O goes through a tiny internal `Storage` seam so the future `storage-io` substrate (the `fsys-rs` rename) can drop in unchanged; v0.3 ships one impl over `std::fs`, and the WAL appends through its own `std::fs` handle until that substrate lands in v0.5.
 
 <br>
 

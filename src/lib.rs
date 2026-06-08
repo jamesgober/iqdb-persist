@@ -10,7 +10,10 @@
 //!   [`PersistedIndex::open_with`] / [`PersistedIndex::save`] /
 //!   [`PersistedIndex::load`] cover the whole common case — wrap an index,
 //!   save it, load it back — with no builder and no generics to name
-//!   beyond the index type itself.
+//!   beyond the index type itself. With the WAL on,
+//!   [`PersistedIndex::insert`] / [`PersistedIndex::delete`] /
+//!   [`PersistedIndex::checkpoint`] add durable, crash-recoverable
+//!   mutation.
 //! - **Tier 2 — the configured path.** The [`PersistConfig`] fields
 //!   ([`fsync_policy`](PersistConfig::fsync_policy),
 //!   [`compression`](PersistConfig::compression),
@@ -35,8 +38,9 @@
 //!   errors if the file does not exist.
 //! - [`FileHeader`] + [`MAGIC`] + [`CURRENT_VERSION`] — the wire format.
 //! - [`PersistConfig`] / [`FsyncPolicy`] / [`Compression`] — configuration.
-//!   `Compression::Zstd|Lz4` and `wal_enabled = true` are rejected in v0.2
-//!   with [`PersistError::Unsupported`].
+//!   `wal_enabled = true` turns on the write-ahead log (v0.3);
+//!   `Compression::Zstd|Lz4` is still rejected with
+//!   [`PersistError::Unsupported`] until v0.4.
 //! - [`PersistError`] — `#[non_exhaustive]` and `error_forge::ForgeError`-
 //!   integrated.
 //!
@@ -52,10 +56,11 @@
 //!
 //! ## Scope
 //!
-//! v0.2 ships atomic snapshot save/load + header + CRC32. WAL,
-//! crash-recovery beyond atomic-snapshot integrity, and compression are
-//! scaffolded as module files and land in later phases. See
-//! `CHANGELOG.md` and `dev/ROADMAP.md`.
+//! v0.2 shipped atomic snapshot save/load + header + CRC32; v0.3 adds the
+//! write-ahead log, replay, and crash recovery (this is the durability
+//! path between snapshots). Compression is scaffolded and lands in v0.4;
+//! the external `storage-io` substrate in v0.5. See `CHANGELOG.md` and
+//! `dev/ROADMAP.md`.
 //!
 //! ## Example
 //!

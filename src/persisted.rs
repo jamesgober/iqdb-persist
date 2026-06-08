@@ -5,15 +5,18 @@
 //! itself.
 
 use std::io::Cursor;
+use std::sync::Arc;
 
 use iqdb_index::Index;
+use iqdb_types::{Metadata, VectorId};
 
 use crate::Persistable;
-use crate::checksum;
 use crate::config::{Compression, PersistConfig};
 use crate::error::{PersistError, Result};
 use crate::format::{self, CURRENT_VERSION, FileHeader, MAGIC};
 use crate::storage::{StdFsStorage, Storage};
+use crate::wal::Wal;
+use crate::{checksum, recovery};
 
 /// A snapshot-persistent wrapper around an in-memory index.
 ///
@@ -42,6 +45,9 @@ pub struct PersistedIndex<I: Index + Persistable> {
     inner: I,
     config: PersistConfig,
     storage: Box<dyn Storage>,
+    // `Some` exactly when `config.wal_enabled`. Holds the live, append-
+    // positioned write-ahead log; `None` in snapshot-only mode.
+    wal: Option<Wal>,
 }
 
 // `Box<dyn Storage>` is not `Debug`, so we cannot `#[derive(Debug)]`.
@@ -54,30 +60,35 @@ impl<I: Index + Persistable + core::fmt::Debug> core::fmt::Debug for PersistedIn
             .field("inner", &self.inner)
             .field("config", &self.config)
             .field("storage", &"<dyn Storage>")
+            .field("wal", &self.wal.is_some())
             .finish()
     }
 }
 
 impl<I: Index + Persistable> PersistedIndex<I> {
-    /// Wrap an already-constructed `inner` for later snapshot saves.
+    /// Wrap an already-constructed `inner`.
     ///
-    /// Performs no disk I/O at construction time.
+    /// In snapshot-only mode (`config.wal_enabled = false`) this performs
+    /// no disk I/O — call [`save`](Self::save) when you want to write.
+    /// With the WAL enabled it establishes the on-disk state immediately:
+    /// it writes an initial snapshot (the base every later replay starts
+    /// from) and opens a fresh write-ahead log beside it. Use this to
+    /// start from an in-memory index; use [`load`](Self::load) to recover
+    /// an existing one.
     ///
     /// # Errors
     ///
-    /// Returns [`PersistError::Unsupported`] if `config` requests a
-    /// feature this build does not implement
-    /// (`wal_enabled = true` or any non-`None` compression in v0.2).
+    /// - [`PersistError::Unsupported`] if `config` requests a feature this
+    ///   build does not implement (any non-`None` compression).
+    /// - With the WAL enabled, any [`save`](Self::save) error from writing
+    ///   the initial snapshot, or [`PersistError::Io`] opening the WAL.
     pub fn open_with(inner: I, config: PersistConfig) -> Result<Self> {
-        validate_config(&config)?;
-        Ok(Self {
-            inner,
-            config,
-            storage: Box::new(StdFsStorage),
-        })
+        Self::open_with_storage(inner, config, Box::new(StdFsStorage))
     }
 
-    /// Read `config.path` from disk and reconstruct the wrapped index.
+    /// Read `config.path` from disk and reconstruct the wrapped index. With
+    /// the WAL enabled, every mutation logged after the snapshot is then
+    /// replayed onto it, restoring the last acknowledged state.
     ///
     /// # Errors
     ///
@@ -91,39 +102,49 @@ impl<I: Index + Persistable> PersistedIndex<I> {
     /// - [`PersistError::ChecksumMismatch`] if the payload CRC32 does
     ///   not match the header.
     /// - [`PersistError::InvalidPayload`] if the impl-reconstructed
-    ///   index's `dim` / `metric` / `len` disagrees with the header.
+    ///   index's `dim` / `metric` / `len` disagrees with the header, or a
+    ///   WAL record disagrees with the index dimension.
     /// - [`PersistError::IndexBuild`] if the
-    ///   [`Persistable::load_from`] impl returned a downstream
-    ///   [`iqdb_types::IqdbError`].
+    ///   [`Persistable::load_from`] impl, or a replayed mutation, returned
+    ///   a downstream [`iqdb_types::IqdbError`].
     /// - [`PersistError::Unsupported`] if `config` requests an
     ///   unsupported feature (see [`open_with`](Self::open_with)).
     pub fn load(config: PersistConfig) -> Result<Self> {
-        validate_config(&config)?;
         Self::load_with_storage(config, Box::new(StdFsStorage))
     }
 
     /// Build a `PersistedIndex` against a non-default [`Storage`]
-    /// substrate. Test seam — gated to `cfg(test)` so it does not
-    /// appear in the v0.2 public surface.
-    #[cfg(test)]
+    /// substrate. The snapshot path goes through `storage`; the WAL (when
+    /// enabled) uses `std::fs` directly until the `storage-io` substrate
+    /// lands in v0.5.
     pub(crate) fn open_with_storage(
         inner: I,
         config: PersistConfig,
         storage: Box<dyn Storage>,
     ) -> Result<Self> {
         validate_config(&config)?;
-        Ok(Self {
+        let mut this = Self {
             inner,
             config,
             storage,
-        })
+            wal: None,
+        };
+        if this.config.wal_enabled {
+            // Establish a base snapshot so `load` always reconstructs from
+            // real state, then start a fresh, empty WAL beside it.
+            this.write_snapshot()?;
+            let wal = Wal::create(&this.config.path, this.config.fsync_policy)?;
+            this.wal = Some(wal);
+        }
+        Ok(this)
     }
 
-    /// `load`, but reading through `storage`. Test seam.
+    /// `load`, but reading the snapshot through `storage`.
     pub(crate) fn load_with_storage(
         config: PersistConfig,
         storage: Box<dyn Storage>,
     ) -> Result<Self> {
+        validate_config(&config)?;
         let bytes = storage.read_all(&config.path)?;
         let mut cursor = Cursor::new(&bytes[..]);
         let header = format::read_header(&mut cursor)?;
@@ -169,11 +190,20 @@ impl<I: Index + Persistable> PersistedIndex<I> {
             });
         }
 
-        Ok(Self {
+        let mut this = Self {
             inner,
             config,
             storage,
-        })
+            wal: None,
+        };
+        if this.config.wal_enabled {
+            // Replay the deltas the WAL recorded after this snapshot, then
+            // re-open the same WAL for continued appends at its end.
+            let _applied = recovery::replay(&this.config.path, &mut this.inner)?;
+            let wal = Wal::open_for_append(&this.config.path, this.config.fsync_policy)?;
+            this.wal = Some(wal);
+        }
+        Ok(this)
     }
 
     /// Borrow the wrapped index for queries.
@@ -182,7 +212,14 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         &self.inner
     }
 
-    /// Borrow the wrapped index mutably for inserts / deletes / flush.
+    /// Borrow the wrapped index mutably for direct inserts / deletes /
+    /// flush.
+    ///
+    /// **WAL note:** mutations made through this borrow **bypass the
+    /// write-ahead log** — they are not logged and will not survive a crash
+    /// until the next [`checkpoint`](Self::checkpoint). In WAL mode prefer
+    /// [`insert`](Self::insert) / [`delete`](Self::delete), which log
+    /// before applying.
     pub fn index_mut(&mut self) -> &mut I {
         &mut self.inner
     }
@@ -193,8 +230,84 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         &self.config
     }
 
-    /// Write the current state of the wrapped index to
-    /// `self.config.path` atomically.
+    /// Apply an insert durably: with the WAL enabled, the mutation is
+    /// **logged and `fsync`ed before** it is applied in memory, so an
+    /// acknowledged insert survives a crash and is restored on the next
+    /// [`load`](Self::load). In snapshot-only mode it applies to memory
+    /// directly (durability comes from the next [`save`](Self::save)).
+    ///
+    /// If the in-memory apply is rejected (for example a duplicate id), the
+    /// just-logged record is rolled back so the WAL stays exactly in step
+    /// with the index.
+    ///
+    /// # Errors
+    ///
+    /// - [`PersistError::Io`] if the WAL append or `fsync` fails.
+    /// - [`PersistError::IndexBuild`] if the index rejects the insert.
+    /// - [`PersistError::InvalidPayload`] if the vector length does not fit
+    ///   in `u32`.
+    pub fn insert(
+        &mut self,
+        id: VectorId,
+        vector: Arc<[f32]>,
+        meta: Option<Metadata>,
+    ) -> Result<()> {
+        let Self { inner, wal, .. } = self;
+        match wal {
+            Some(w) => {
+                let mark = w.mark()?;
+                w.append_insert(&id, &vector, meta.as_ref())?;
+                match inner.insert(id, vector, meta) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        w.rollback(mark)?;
+                        Err(PersistError::from(e))
+                    }
+                }
+            }
+            None => {
+                inner.insert(id, vector, meta)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply a delete durably — the [`insert`](Self::insert) contract, for
+    /// removals.
+    ///
+    /// # Errors
+    ///
+    /// - [`PersistError::Io`] if the WAL append or `fsync` fails.
+    /// - [`PersistError::IndexBuild`] if the index rejects the delete (for
+    ///   example an absent id).
+    pub fn delete(&mut self, id: &VectorId) -> Result<()> {
+        let Self { inner, wal, .. } = self;
+        match wal {
+            Some(w) => {
+                let mark = w.mark()?;
+                w.append_delete(id)?;
+                match inner.delete(id) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        w.rollback(mark)?;
+                        Err(PersistError::from(e))
+                    }
+                }
+            }
+            None => {
+                inner.delete(id)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Write a snapshot of the current state to `self.config.path`
+    /// atomically.
+    ///
+    /// In WAL mode this does **not** truncate the log — prefer
+    /// [`checkpoint`](Self::checkpoint), which writes a snapshot *and*
+    /// resets the WAL so the two never double-count a mutation on the next
+    /// [`load`](Self::load).
     ///
     /// # Errors
     ///
@@ -203,12 +316,37 @@ impl<I: Index + Persistable> PersistedIndex<I> {
     /// - Any error returned by [`Persistable::save_to`].
     /// - [`PersistError::InvalidPayload`] if a `usize` field of the
     ///   index does not fit in `u64`.
+    pub fn save(&self) -> Result<()> {
+        self.write_snapshot()
+    }
+
+    /// Write a fresh snapshot and reset the WAL to empty — the WAL-mode
+    /// durability-compaction operation.
+    ///
+    /// After a checkpoint the snapshot alone captures the full state, so
+    /// the log can be truncated; this bounds WAL growth. In snapshot-only
+    /// mode it is equivalent to [`save`](Self::save).
+    ///
+    /// # Errors
+    ///
+    /// The [`save`](Self::save) errors, plus [`PersistError::Io`] if
+    /// truncating or re-initialising the WAL fails.
+    pub fn checkpoint(&mut self) -> Result<()> {
+        self.write_snapshot()?;
+        if let Some(wal) = &mut self.wal {
+            wal.reset()?;
+        }
+        Ok(())
+    }
+
+    /// The shared snapshot writer behind [`save`](Self::save) /
+    /// [`checkpoint`](Self::checkpoint) and the WAL-mode initial snapshot.
     #[tracing::instrument(level = "debug", skip_all, fields(
         path = %self.config.path.display(),
         index_type = I::INDEX_TYPE,
         n = self.inner.len(),
     ))]
-    pub fn save(&self) -> Result<()> {
+    fn write_snapshot(&self) -> Result<()> {
         let mut payload_buf: Vec<u8> = Vec::new();
         <I as Persistable>::save_to(&self.inner, &mut payload_buf)?;
 
@@ -233,12 +371,6 @@ impl<I: Index + Persistable> PersistedIndex<I> {
 }
 
 fn validate_config(config: &PersistConfig) -> Result<()> {
-    if config.wal_enabled {
-        return Err(PersistError::Unsupported {
-            feature: "wal_enabled",
-            available_in: "v0.3",
-        });
-    }
     if !matches!(config.compression, Compression::None) {
         return Err(PersistError::Unsupported {
             feature: "compression",
@@ -461,10 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_config_rejects_wal_and_compression() {
+    fn validate_config_rejects_compression() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot = dir.path().join("idx.iqdb");
 
+        // WAL is supported as of v0.3 — enabling it must succeed.
         let mut cfg = PersistConfig::new(&snapshot);
         cfg.wal_enabled = true;
         let inner = MockIndex {
@@ -472,15 +605,9 @@ mod tests {
             metric: DistanceMetric::Euclidean,
             n: 0,
         };
-        let err = PersistedIndex::open_with(inner, cfg).unwrap_err();
-        assert!(matches!(
-            err,
-            PersistError::Unsupported {
-                feature: "wal_enabled",
-                ..
-            }
-        ));
+        assert!(PersistedIndex::open_with(inner, cfg).is_ok());
 
+        // Compression still lands later and is rejected at construction.
         let mut cfg2 = PersistConfig::new(&snapshot);
         cfg2.compression = Compression::Lz4;
         let inner2 = MockIndex {

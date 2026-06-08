@@ -18,6 +18,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.3.0] - 2026-06-07
+
+The write-ahead log: durable, crash-recoverable mutation between snapshots.
+
+### Added
+
+- **Write-ahead log.** `PersistConfig::wal_enabled` turns on a log beside
+  the snapshot (`path` + `.wal`). Self-checked frames (per-record length +
+  CRC32) over a compact binary encoding of insert/delete mutations,
+  including `VectorId` (`U64` / `Bytes`) and `Metadata`.
+- **`PersistedIndex::insert` / `delete`** — the durable mutation path: each
+  op is logged and `fsync`ed (per `FsyncPolicy`) **before** it is applied in
+  memory. A rejected apply rolls the just-logged frame back, so the WAL
+  never drifts from the index.
+- **`PersistedIndex::checkpoint`** — write a fresh snapshot and truncate the
+  WAL, bounding log growth and preventing double-apply on the next load.
+- **Crash recovery.** `PersistedIndex::load` replays every committed frame
+  onto the snapshot. A torn tail (truncated or mis-checksummed final frame
+  from a crash mid-append) is detected and discarded.
+- **`FsyncPolicy::Periodic`** now governs WAL appends, `fsync`ing no more
+  than once per interval.
+- WAL lifecycle + crash-recovery integration tests, a `proptest` round-trip
+  over arbitrary records, and `criterion` benches for WAL append and replay
+  (`benches/wal_bench.rs`).
+
+### Changed
+
+- `PersistConfig::wal_enabled = true` is now honored (was rejected with
+  `PersistError::Unsupported` in v0.2). Compression remains rejected until
+  v0.4.
+- `PersistedIndex::open_with` writes an initial snapshot and opens a fresh
+  WAL when `wal_enabled` (still no I/O in snapshot-only mode).
+
+---
+
 ## [0.2.0] - 2026-06-07
 
 The first functional release: atomic snapshot save/load, the versioned
@@ -74,6 +109,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/iqdb-persist/releases/tag/v0.1.0
