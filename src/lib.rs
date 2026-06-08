@@ -57,12 +57,13 @@
 //!
 //! ## Scope
 //!
-//! v0.2 shipped atomic snapshot save/load + header + CRC32; v0.3 added the
-//! write-ahead log, replay, and crash recovery; v0.4 added optional Zstd /
-//! LZ4 snapshot compression and froze the feature set. **As of v0.5 the
-//! public API and the on-disk format are frozen** and the parse/recovery
-//! paths are adversarially hardened. The external `storage-io` substrate is
-//! deferred behind the internal storage seam (see `dev/ROADMAP.md`). See
+//! **Stable as of v1.0.0.** The full surface — atomic snapshots + CRC32,
+//! the write-ahead log with replay and crash recovery, and optional Zstd /
+//! LZ4 snapshot compression — is complete, the parse/recovery paths are
+//! adversarially hardened, and the public API and on-disk format are frozen
+//! under the SemVer 1.x guarantee (no breaking changes before 2.0). The
+//! external `storage-io` substrate is deferred behind the internal storage
+//! seam and is out of scope for 1.0 (see `dev/ROADMAP.md`). See
 //! `CHANGELOG.md`.
 //!
 //! ## Example

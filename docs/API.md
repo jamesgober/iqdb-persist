@@ -1,12 +1,12 @@
 # iqdb-persist &mdash; API Reference
 
-> Complete reference for every public item in `iqdb-persist` v0.5.0, with
+> Complete reference for every public item in `iqdb-persist` v1.0.0, with
 > descriptions, parameters, errors, and runnable examples.
 >
-> **As of v0.5 the public API and the on-disk format are frozen** — the
-> surface below is the committed SemVer 1.x contract, and the parse and
-> recovery paths are adversarially hardened (exhaustive byte-flip /
-> truncation / garbage testing).
+> **Stable (v1.0.0).** The surface below is the committed SemVer 1.x
+> contract — no breaking changes before 2.0. The on-disk format is frozen
+> and the parse/recovery paths are adversarially hardened (exhaustive
+> byte-flip / truncation / garbage testing).
 
 `iqdb-persist` is the on-disk persistence layer of the iQDB vector
 database. It adds durable snapshot **save** and **load** to any index that
@@ -52,7 +52,7 @@ memory and replayed onto the snapshot on load, so an acknowledged
 
 ```toml
 [dependencies]
-iqdb-persist = "0.6"
+iqdb-persist = "1.0"
 ```
 
 `iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError`,
@@ -62,7 +62,7 @@ consumer depends on all three:
 
 ```toml
 [dependencies]
-iqdb-persist = "0.6"
+iqdb-persist = "1.0"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```

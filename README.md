@@ -29,7 +29,7 @@
         <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Atomic saves. Versioned, portable on-disk format. CRC32 integrity.
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: stable (v1.0.0).</strong> The public API and on-disk format are frozen under the SemVer 1.x guarantee — no breaking changes before 2.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -51,7 +51,7 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.6"
+iqdb-persist = "1.0"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -59,7 +59,7 @@ iqdb-types   = "1.0"
 Snapshot compression is opt-in via cargo features (off by default):
 
 ```toml
-iqdb-persist = { version = "0.6", features = ["zstd", "lz4"] }
+iqdb-persist = { version = "1.0", features = ["zstd", "lz4"] }
 ```
 
 <br>
@@ -103,7 +103,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v0.6.0</code> (alpha): the feature set — atomic snapshots + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) — is complete, the <strong>public API and on-disk format are frozen</strong> (v0.5), and the parse/recovery paths are adversarially hardened. v0.6 adds property tests for the core invariants (snapshot round-trip fidelity, and WAL replay reconstructing the in-memory state after a crash). What remains to <code>1.0</code> is the beta/rc soak (0.7–0.9); the external `storage-io` substrate is deferred behind the internal storage seam. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+This is <code>v1.0.0</code> — <strong>stable</strong>. Atomic snapshots + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are complete; the API and on-disk format were frozen at v0.5 and the parse/recovery paths adversarially hardened; v0.6 added property tests for the core invariants. The public API and on-disk format are now committed under the SemVer 1.x guarantee — no breaking changes before 2.0. The external `storage-io` substrate is out of scope for 1.0, deferred behind the internal storage seam (an internal swap when it lands, not an API change). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

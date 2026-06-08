@@ -18,6 +18,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [1.0.0] - 2026-06-08
+
+First stable release. The persistence layer is feature-complete and its
+public API and on-disk format are frozen under the SemVer 1.x guarantee —
+no breaking changes until 2.0.
+
+### Summary of the 1.0 surface
+
+- **Atomic snapshots** — versioned header, CRC32 over the payload, and a
+  temp-file + `fsync` + atomic-rename + directory-`fsync` write that never
+  corrupts an existing good file.
+- **Write-ahead log** — `wal_enabled` logs and `fsync`es every `insert` /
+  `delete` before applying it, replays on `load`, and compacts with
+  `checkpoint`; a crash mid-append leaves a torn tail that recovery
+  discards.
+- **Optional compression** — `Compression::Zstd` / `Lz4` on the snapshot
+  payload, behind the `zstd` / `lz4` cargo features.
+- **Hardened** — exhaustive single-byte-flip / truncation / garbage testing
+  of snapshot and WAL parsing; property tests for the snapshot round-trip
+  and WAL-replay invariants; zero `unsafe`.
+
+### Changed
+
+- Version bump to 1.0.0; the API and on-disk format (frozen since v0.5) are
+  now the committed stable contract. No code changes from v0.6.0.
+
+### Notes
+
+- The 0.7.x–0.9.x alpha/beta/rc steps were folded into this release: the one
+  substantive remaining item — concrete `Persistable` impls for the index
+  crates — lives in the umbrella `iqdb` crate, not here (the published index
+  crates expose no entry enumeration and do not depend on `iqdb-persist`).
+  Everything in this crate's Definition of Done (`dev/DIRECTIVES.md` §7) is
+  satisfied, so it goes to 1.0 directly.
+- `storage-io` integration remains out of scope for 1.0, deferred behind the
+  internal `Storage` seam.
+
+---
+
 ## [0.6.0] - 2026-06-08
 
 Alpha: core-invariant property tests and an end-to-end recovery example.
@@ -201,7 +240,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.6.0...v1.0.0
 [0.6.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...v0.4.0

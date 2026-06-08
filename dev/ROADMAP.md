@@ -103,11 +103,22 @@ goes through a version bump, never a silent reinterpretation.
 
 ---
 
-## v1.0.0 -- Stable
+## v1.0.0 -- Stable (DONE)
 
-- [ ] Definition of Done (DIRECTIVES section 7) satisfied.
-- [ ] Public API frozen until 2.0.
-- [ ] Release note written; published to crates.io; tag pushed.
+- [x] Definition of Done (DIRECTIVES section 7) satisfied.
+- [x] Public API frozen until 2.0.
+- [x] Release note written (`docs/release/v1.0.0.md`). Publish + tag: owner.
+
+Reached directly from v0.6.0: the 0.7.x–0.9.x alpha/beta/rc steps had no
+crate-local work left. The one substantive remaining item — concrete
+`Persistable` impls for `iqdb-flat` / `iqdb-hnsw` / `iqdb-ivf` — cannot live
+here (those frozen 1.0 crates expose no entry enumeration and do not depend
+on `iqdb-persist`); it belongs in the umbrella `iqdb` crate. With the DoD
+fully met, soak/polish complete, and nothing left to defer, 1.0 follows.
+
+`loom` is not applicable: `PersistedIndex` is single-writer (`&mut self`
+for mutation, `&self` for reads) with no shared-state or lock-free path, so
+there is nothing for a concurrency model checker to explore.
 
 ---
 
