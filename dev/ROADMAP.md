@@ -88,7 +88,16 @@ goes through a version bump, never a silent reinterpretation.
 
 ## v0.6.0 -> v0.9.x -- Alpha / Beta -> RC
 
-- 0.6.x-0.7.x: integrate against real consumers; MINOR-compatible additions only.
+- **0.6.0 (alpha) — DONE.** Core-invariant property tests
+  (`tests/invariants.rs`: snapshot round-trip fidelity; WAL replay ==
+  in-memory model after a crash) and an end-to-end `wal_recovery` example.
+  MINOR-compatible only; no surface change.
+- 0.7.x: continue integrating against real consumers. NOTE: a concrete
+  `Persistable` impl for `iqdb-flat` / `iqdb-hnsw` / `iqdb-ivf` cannot live
+  here — those 1.0 crates expose no entry enumeration and do not depend on
+  `iqdb-persist`. That wiring belongs in the umbrella `iqdb` crate (which
+  also owns the `index_type` -> concrete-type registry). Within this repo
+  the contract is validated by the full-fidelity mock + examples.
 - 0.8.x (beta): bug fixes; broader testing; final benchmarks.
 - 0.9.x (rc): critical fixes + doc polish.
 

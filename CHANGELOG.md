@@ -18,6 +18,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.6.0] - 2026-06-08
+
+Alpha: core-invariant property tests and an end-to-end recovery example.
+
+### Added
+
+- **Property tests for both `dev/DIRECTIVES.md` §8 invariants**
+  (`tests/invariants.rs`), against a full-fidelity mock that serialises
+  ids, vectors, and metadata:
+  - *Atomic snapshot round-trip* — a saved index loads back equal in state
+    for arbitrary contents, across every compression scheme built in.
+  - *WAL replay is the recovery contract* — an arbitrary insert / delete /
+    checkpoint sequence, followed by a simulated crash (drop without a
+    trailing checkpoint), recovers to exactly the in-memory model's state.
+- **`examples/wal_recovery.rs`** — the durable-mutation lifecycle end to
+  end: WAL inserts/deletes, a checkpoint, a simulated crash, and recovery.
+
+### Changed
+
+- No API or on-disk-format changes — both remain frozen as of v0.5. This is
+  test and documentation hardening only.
+
+---
+
 ## [0.5.0] - 2026-06-08
 
 API freeze, on-disk-format freeze, and adversarial hardening.
@@ -177,7 +201,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.2.0...v0.3.0

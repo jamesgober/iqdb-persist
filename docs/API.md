@@ -52,7 +52,7 @@ memory and replayed onto the snapshot on load, so an acknowledged
 
 ```toml
 [dependencies]
-iqdb-persist = "0.5"
+iqdb-persist = "0.6"
 ```
 
 `iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError`,
@@ -62,7 +62,7 @@ consumer depends on all three:
 
 ```toml
 [dependencies]
-iqdb-persist = "0.5"
+iqdb-persist = "0.6"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```

@@ -51,7 +51,7 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.5"
+iqdb-persist = "0.6"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -59,7 +59,7 @@ iqdb-types   = "1.0"
 Snapshot compression is opt-in via cargo features (off by default):
 
 ```toml
-iqdb-persist = { version = "0.5", features = ["zstd", "lz4"] }
+iqdb-persist = { version = "0.6", features = ["zstd", "lz4"] }
 ```
 
 <br>
@@ -103,7 +103,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v0.5.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are implemented and tested. As of v0.5 the <strong>public API and on-disk format are frozen</strong> and the parse/recovery paths are adversarially hardened (exhaustive byte-flip / truncation / garbage). What remains to <code>1.0</code> is the alpha/beta/rc hardening series (0.6–0.9); the external `storage-io` substrate is deferred behind the internal storage seam. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+This is <code>v0.6.0</code> (alpha): the feature set — atomic snapshots + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) — is complete, the <strong>public API and on-disk format are frozen</strong> (v0.5), and the parse/recovery paths are adversarially hardened. v0.6 adds property tests for the core invariants (snapshot round-trip fidelity, and WAL replay reconstructing the in-memory state after a crash). What remains to <code>1.0</code> is the beta/rc soak (0.7–0.9); the external `storage-io` substrate is deferred behind the internal storage seam. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>
@@ -115,7 +115,7 @@ This is <code>v0.5.0</code>: atomic snapshot save/load + versioned header + CRC3
 - `iqdb-types` &mdash; core vocabulary (`DistanceMetric`, `IqdbError`)
 - `iqdb-index` &mdash; the `Index` / `IndexCore` traits it wraps as persistable
 
-Snapshot file I/O goes through a tiny internal `Storage` seam so the future `storage-io` substrate (the `fsys-rs` rename) can drop in unchanged; v0.3 ships one impl over `std::fs`, and the WAL appends through its own `std::fs` handle until that substrate lands in v0.5.
+Snapshot file I/O goes through a tiny internal `Storage` seam so the future `storage-io` substrate (the `fsys-rs` rename) can drop in unchanged; today it ships one impl over `std::fs`, and the WAL appends through its own `std::fs` handle. Adopting `storage-io` is deferred until that rename lands — an internal swap behind the seam, not an API change.
 
 <br>
 
