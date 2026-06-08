@@ -49,12 +49,19 @@ pub const MAGIC: [u8; 8] = *b"IQDBPRST";
 
 /// The on-disk format version this build writes.
 ///
+/// Version `1` (v0.2–v0.3) stored the payload verbatim. Version `2` (v0.4+)
+/// prefixes the payload region with a compression preamble; version-1 files
+/// are still read (as uncompressed). The format is not frozen until v0.5.
+///
 /// # Examples
 ///
 /// ```
-/// assert_eq!(iqdb_persist::CURRENT_VERSION, 1);
+/// assert_eq!(iqdb_persist::CURRENT_VERSION, 2);
 /// ```
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
+
+/// The oldest on-disk format version this build can still read.
+pub(crate) const MIN_SUPPORTED_VERSION: u32 = 1;
 
 /// The header at the start of every iqdb snapshot file.
 ///
@@ -87,8 +94,9 @@ pub const CURRENT_VERSION: u32 = 1;
 pub struct FileHeader {
     /// Magic bytes — always equal to [`MAGIC`].
     pub magic: [u8; 8],
-    /// On-disk format version. Reader gates on
-    /// `== CURRENT_VERSION` in v0.2.
+    /// On-disk format version. The reader accepts any version in
+    /// `MIN_SUPPORTED_VERSION..=CURRENT_VERSION` and records which one it
+    /// read here, so the payload can be decoded per that version.
     pub version: u32,
     /// Stable index-type tag — matched against
     /// [`crate::Persistable::INDEX_TYPE`] on load.
@@ -215,8 +223,8 @@ pub fn write_header(writer: &mut dyn Write, header: &FileHeader) -> Result<()> {
 ///
 /// - `magic` must equal [`MAGIC`] — otherwise
 ///   [`PersistError::BadMagic`].
-/// - `version` must equal [`CURRENT_VERSION`] — otherwise
-///   [`PersistError::UnsupportedVersion`].
+/// - `version` must be in the supported range (up to [`CURRENT_VERSION`])
+///   — otherwise [`PersistError::UnsupportedVersion`].
 /// - The metric tag must be in the known set — otherwise
 ///   [`PersistError::InvalidMetric`].
 ///
@@ -240,7 +248,7 @@ pub fn read_header(reader: &mut dyn Read) -> Result<FileHeader> {
     let mut buf4 = [0u8; 4];
     read_exact_or_truncated(reader, &mut buf4)?;
     let version = u32::from_le_bytes(buf4);
-    if version != CURRENT_VERSION {
+    if !(MIN_SUPPORTED_VERSION..=CURRENT_VERSION).contains(&version) {
         return Err(PersistError::UnsupportedVersion {
             found: version,
             supported: CURRENT_VERSION,

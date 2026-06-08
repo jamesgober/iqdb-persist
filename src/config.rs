@@ -40,12 +40,13 @@ pub enum FsyncPolicy {
     Never,
 }
 
-/// Compression applied to the payload bytes on save.
+/// Compression applied to the snapshot payload on save (v0.4+).
 ///
-/// v0.2 ships `None`. The other variants are present so the
-/// `PersistConfig` shape does not change when compression lands; in
-/// v0.2 they return [`crate::PersistError::Unsupported`] at
-/// [`crate::PersistedIndex`] construction.
+/// `Zstd` and `Lz4` are gated behind the `zstd` / `lz4` cargo features.
+/// Selecting a scheme whose feature is not compiled in returns
+/// [`crate::PersistError::Unsupported`] at [`crate::PersistedIndex`]
+/// construction — never a panic or a silent fallback. Compression applies
+/// only to snapshots; the WAL is always stored uncompressed.
 ///
 /// # Examples
 ///
@@ -60,14 +61,15 @@ pub enum FsyncPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Compression {
-    /// No compression. The only variant honored in v0.2.
+    /// No compression — the payload is stored verbatim. Always available.
     None,
-    /// Zstd compression at the given level. Lands in v0.4.
+    /// Zstandard compression at the given level (requires the `zstd`
+    /// feature). Best ratio; `level` must be in `1..=22`.
     Zstd {
         /// The Zstd compression level (1–22).
         level: i32,
     },
-    /// LZ4 compression. Lands in v0.4.
+    /// LZ4 compression (requires the `lz4` feature). Fastest; lower ratio.
     Lz4,
 }
 

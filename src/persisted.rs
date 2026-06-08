@@ -16,7 +16,7 @@ use crate::error::{PersistError, Result};
 use crate::format::{self, CURRENT_VERSION, FileHeader, MAGIC};
 use crate::storage::{StdFsStorage, Storage};
 use crate::wal::Wal;
-use crate::{checksum, recovery};
+use crate::{checksum, compression, recovery};
 
 /// A snapshot-persistent wrapper around an in-memory index.
 ///
@@ -171,7 +171,31 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         let payload = &bytes[header_end..];
         checksum::verify(payload, header.crc32)?;
 
-        let mut payload_cursor = Cursor::new(payload);
+        // Format v2 prefixes the payload region with a compression preamble
+        // (`[scheme tag u8][uncompressed_len u64 LE]`); format v1 stored the
+        // payload verbatim. Decode to the raw `Persistable` bytes.
+        let raw: Vec<u8> = if header.version >= 2 {
+            if payload.len() < 9 {
+                return Err(PersistError::TruncatedPayload {
+                    needed: 9,
+                    found: payload.len() as u64,
+                });
+            }
+            let tag = payload[0];
+            let mut len_bytes = [0u8; 8];
+            len_bytes.copy_from_slice(&payload[1..9]);
+            let uncompressed_len =
+                usize::try_from(u64::from_le_bytes(len_bytes)).map_err(|_| {
+                    PersistError::InvalidPayload {
+                        reason: "uncompressed length does not fit in usize on this host",
+                    }
+                })?;
+            compression::decode(tag, &payload[9..], uncompressed_len)?
+        } else {
+            payload.to_vec()
+        };
+
+        let mut payload_cursor = Cursor::new(&raw[..]);
         let inner = <I as Persistable>::load_from(&mut payload_cursor)?;
 
         if inner.dim() != header.dim {
@@ -350,7 +374,21 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         let mut payload_buf: Vec<u8> = Vec::new();
         <I as Persistable>::save_to(&self.inner, &mut payload_buf)?;
 
-        let crc32 = checksum::compute(&payload_buf);
+        // Format v2 payload region: [scheme tag u8][uncompressed_len u64 LE]
+        // followed by the (optionally compressed) payload. The CRC32 covers
+        // the whole region, so corruption is caught before decompression.
+        let scheme = self.config.compression;
+        let data = compression::encode(scheme, &payload_buf)?;
+        let uncompressed_len =
+            u64::try_from(payload_buf.len()).map_err(|_| PersistError::InvalidPayload {
+                reason: "payload length does not fit in u64",
+            })?;
+        let mut region: Vec<u8> = Vec::with_capacity(9 + data.len());
+        region.push(compression::scheme_tag(scheme));
+        region.extend_from_slice(&uncompressed_len.to_le_bytes());
+        region.extend_from_slice(&data);
+
+        let crc32 = checksum::compute(&region);
         let header = FileHeader {
             magic: MAGIC,
             version: CURRENT_VERSION,
@@ -361,9 +399,9 @@ impl<I: Index + Persistable> PersistedIndex<I> {
             crc32,
         };
 
-        let mut full: Vec<u8> = Vec::with_capacity(payload_buf.len() + 64);
+        let mut full: Vec<u8> = Vec::with_capacity(region.len() + 64);
         format::write_header(&mut full, &header)?;
-        full.extend_from_slice(&payload_buf);
+        full.extend_from_slice(&region);
 
         self.storage
             .write_atomic(&self.config.path, &full, self.config.fsync_policy)
@@ -371,13 +409,29 @@ impl<I: Index + Persistable> PersistedIndex<I> {
 }
 
 fn validate_config(config: &PersistConfig) -> Result<()> {
-    if !matches!(config.compression, Compression::None) {
-        return Err(PersistError::Unsupported {
-            feature: "compression",
-            available_in: "v0.4",
-        });
+    match config.compression {
+        Compression::None => Ok(()),
+        Compression::Zstd { .. } => {
+            if cfg!(feature = "zstd") {
+                Ok(())
+            } else {
+                Err(PersistError::Unsupported {
+                    feature: "Zstd compression",
+                    available_in: "the `zstd` cargo feature",
+                })
+            }
+        }
+        Compression::Lz4 => {
+            if cfg!(feature = "lz4") {
+                Ok(())
+            } else {
+                Err(PersistError::Unsupported {
+                    feature: "LZ4 compression",
+                    available_in: "the `lz4` cargo feature",
+                })
+            }
+        }
     }
-    Ok(())
 }
 
 // ----------------------------------------------------------------------
@@ -593,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_config_rejects_compression() {
+    fn wal_config_is_accepted() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot = dir.path().join("idx.iqdb");
 
@@ -606,23 +660,43 @@ mod tests {
             n: 0,
         };
         assert!(PersistedIndex::open_with(inner, cfg).is_ok());
+    }
 
-        // Compression still lands later and is rejected at construction.
-        let mut cfg2 = PersistConfig::new(&snapshot);
-        cfg2.compression = Compression::Lz4;
-        let inner2 = MockIndex {
+    /// A compression scheme whose cargo feature is not compiled in is
+    /// rejected at construction. (When the feature *is* on, the same config
+    /// is accepted — covered by the compression integration tests.)
+    #[cfg(not(feature = "lz4"))]
+    #[test]
+    fn validate_config_rejects_lz4_without_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("idx.iqdb");
+
+        let mut cfg = PersistConfig::new(&snapshot);
+        cfg.compression = Compression::Lz4;
+        let inner = MockIndex {
             dim: 4,
             metric: DistanceMetric::Euclidean,
             n: 0,
         };
-        let err = PersistedIndex::open_with(inner2, cfg2).unwrap_err();
-        assert!(matches!(
-            err,
-            PersistError::Unsupported {
-                feature: "compression",
-                ..
-            }
-        ));
+        let err = PersistedIndex::open_with(inner, cfg).unwrap_err();
+        assert!(matches!(err, PersistError::Unsupported { .. }));
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn validate_config_rejects_zstd_without_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("idx.iqdb");
+
+        let mut cfg = PersistConfig::new(&snapshot);
+        cfg.compression = Compression::Zstd { level: 3 };
+        let inner = MockIndex {
+            dim: 4,
+            metric: DistanceMetric::Euclidean,
+            n: 0,
+        };
+        let err = PersistedIndex::open_with(inner, cfg).unwrap_err();
+        assert!(matches!(err, PersistError::Unsupported { .. }));
     }
 
     #[test]

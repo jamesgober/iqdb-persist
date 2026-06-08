@@ -18,6 +18,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.4.0] - 2026-06-08
+
+Optional snapshot compression, and the **feature freeze**.
+
+### Added
+
+- **Snapshot compression** — `Compression::Zstd { level }` (Zstandard, via
+  the reference C library) and `Compression::Lz4` (pure-Rust `lz4_flex`),
+  applied to the snapshot payload. Gated behind the new `zstd` / `lz4`
+  cargo features (off by default); selecting a scheme whose feature is not
+  compiled in returns `PersistError::Unsupported`.
+- **On-disk format version 2** — the payload region gains a 9-byte
+  compression preamble (`[scheme tag u8][uncompressed_len u64 LE]`); the
+  CRC32 covers the whole region, so corruption is caught before
+  decompression. **Version-1 snapshots (v0.2–v0.3) still load** as
+  uncompressed.
+- **Decompression-bomb guard** — a payload claiming to expand beyond a
+  per-file ratio bound is rejected as `InvalidPayload`.
+- `PersistError::Compression { reason }` for codec failures (compress-side
+  bad parameters, decompress-side errors or length mismatch).
+- Compression round-trip / shrink / corruption / legacy-v1-read integration
+  tests, codec unit tests, and `benches/compression_bench.rs`.
+
+### Changed
+
+- The persistence **feature set is frozen** as of v0.4: snapshots + CRC32 +
+  atomic writes, WAL + crash recovery, and compression are complete.
+  Remaining work to 1.0 is `storage-io` integration plus the API/format
+  freeze (v0.5), then hardening — no new features.
+- `CURRENT_VERSION` is now `2` (writer); the reader accepts `1..=2`.
+- Selecting `Compression::Zstd` / `Lz4` is now honored (was rejected with
+  `PersistError::Unsupported` through v0.3) when the matching feature is on.
+
+---
+
 ## [0.3.0] - 2026-06-07
 
 The write-ahead log: durable, crash-recoverable mutation between snapshots.
@@ -109,7 +144,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/iqdb-persist/releases/tag/v0.1.0

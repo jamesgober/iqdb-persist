@@ -81,7 +81,7 @@ fn wrong_version_surfaces_as_unsupported_version() {
         err,
         PersistError::UnsupportedVersion {
             found: 999,
-            supported: 1,
+            supported: 2,
         }
     ));
 }

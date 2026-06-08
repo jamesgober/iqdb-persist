@@ -114,6 +114,14 @@ pub enum PersistError {
         /// Short, stable identifier for the structural check that failed.
         reason: &'static str,
     },
+    /// A compression or decompression step failed: an invalid codec
+    /// parameter on save, or a codec error / length mismatch on load.
+    /// (Bulk on-disk corruption is caught earlier by the payload CRC32 and
+    /// surfaces as [`ChecksumMismatch`](Self::ChecksumMismatch).)
+    Compression {
+        /// Short, stable identifier for the codec failure.
+        reason: &'static str,
+    },
     /// A nested [`IqdbError`] surfaced from a downstream construction
     /// step — typically [`iqdb_index::Index::new`] or
     /// [`iqdb_index::IndexCore::insert`] called from inside a
@@ -171,6 +179,9 @@ impl std::fmt::Display for PersistError {
             Self::InvalidPayload { reason } => {
                 write!(f, "invalid payload: {reason}")
             }
+            Self::Compression { reason } => {
+                write!(f, "compression error: {reason}")
+            }
             Self::IndexBuild(e) => write!(f, "index construction failed: {e}"),
             Self::Unsupported {
                 feature,
@@ -208,6 +219,7 @@ impl ForgeError for PersistError {
             Self::UnsupportedMetric { .. } => "UnsupportedMetric",
             Self::InvalidIndexType { .. } => "InvalidIndexType",
             Self::InvalidPayload { .. } => "InvalidPayload",
+            Self::Compression { .. } => "Compression",
             Self::IndexBuild(_) => "IndexBuild",
             Self::Unsupported { .. } => "Unsupported",
         }
@@ -231,6 +243,7 @@ impl ForgeError for PersistError {
                 "header's index-type tag does not match the caller's I"
             }
             Self::InvalidPayload { .. } => "payload bytes decoded to a structurally invalid index",
+            Self::Compression { .. } => "a compression or decompression step failed",
             Self::IndexBuild(_) => "a downstream Index::new or insert returned an error",
             Self::Unsupported { .. } => {
                 "the requested feature lands in a later version of iqdb-persist"

@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "iqdb-persist"
-version = "0.3.0"
+version = "0.4.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.87"
@@ -71,6 +71,12 @@ std = []
 # `PersistConfig` can round-trip through a config file. Additive; the
 # on-disk snapshot format itself is hand-rolled and unaffected.
 serde = ["dep:serde"]
+# Zstd snapshot-payload compression (`Compression::Zstd`). Pulls the
+# reference C library via the `zstd` crate for best ratio + speed.
+zstd = ["dep:zstd"]
+# LZ4 snapshot-payload compression (`Compression::Lz4`). Pure-Rust via
+# `lz4_flex`: no C toolchain, fastest decompression.
+lz4 = ["dep:lz4_flex"]
 
 
 # DEPENDENCIES
@@ -90,6 +96,10 @@ tracing     = { version = "0.1", default-features = false, features = ["attribut
 crc32fast   = "1.4"
 # Optional, additive serialization for the config types.
 serde       = { version = "1", optional = true, features = ["derive"] }
+# Optional snapshot compression codecs (selected at runtime via
+# `Compression`, gated at build time by the `zstd` / `lz4` features).
+zstd        = { version = "0.13", optional = true }
+lz4_flex    = { version = "0.11", optional = true }
 
 
 # DEV DEPENDENCIES
@@ -111,6 +121,11 @@ loom = "0.7"
 [[bench]]
 name    = "wal_bench"
 harness = false
+
+[[bench]]
+name              = "compression_bench"
+harness           = false
+required-features = ["zstd", "lz4"]
 
 
 # RELEASE PROFILE

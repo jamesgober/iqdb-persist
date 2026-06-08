@@ -30,10 +30,16 @@ Exit criteria:
 
 ---
 
-## v0.4.0 -- optional zstd/lz4 compression + feature freeze
+## v0.4.0 -- optional zstd/lz4 compression + feature freeze (DONE)
 
 Exit criteria:
-- [ ] No `todo!`/`unimplemented!`. Feature freeze declared.
+- [x] No `todo!`/`unimplemented!`. Feature freeze declared.
+
+Feature freeze: as of v0.4 the persistence feature set is complete —
+snapshots + header + CRC32 (v0.2), WAL + replay + crash recovery (v0.3),
+and optional Zstd/LZ4 snapshot compression (v0.4). No new features land
+before 1.0; remaining work is `storage-io` integration + the API/format
+freeze (v0.5) and hardening (0.6–0.9).
 
 ---
 

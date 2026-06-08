@@ -1,6 +1,6 @@
 # iqdb-persist &mdash; API Reference
 
-> Complete reference for every public item in `iqdb-persist` v0.3.0, with
+> Complete reference for every public item in `iqdb-persist` v0.4.0, with
 > descriptions, parameters, errors, and runnable examples.
 
 `iqdb-persist` is the on-disk persistence layer of the iQDB vector
@@ -47,7 +47,7 @@ memory and replayed onto the snapshot on load, so an acknowledged
 
 ```toml
 [dependencies]
-iqdb-persist = "0.3"
+iqdb-persist = "0.4"
 ```
 
 `iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError`,
@@ -57,13 +57,13 @@ consumer depends on all three:
 
 ```toml
 [dependencies]
-iqdb-persist = "0.3"
+iqdb-persist = "0.4"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
 
-MSRV is Rust **1.87** (edition 2024). The crate is `std`-only; the `serde`
-feature is opt-in (see [Feature flags](#feature-flags)).
+MSRV is Rust **1.87** (edition 2024). The crate is `std`-only; the `serde`,
+`zstd`, and `lz4` features are opt-in (see [Feature flags](#feature-flags)).
 
 ---
 
@@ -528,17 +528,21 @@ let _ = FsyncPolicy::Never;
 pub enum Compression { None, Zstd { level: i32 }, Lz4 }
 ```
 
-Compression applied to the payload bytes on save. v0.2 ships `None`; the
-other variants exist so the `PersistConfig` shape does not change when
-compression lands in v0.4. Selecting them in v0.2 returns
-[`PersistError::Unsupported`](#errors) at construction.
+Compression applied to the **snapshot payload** on save (the WAL is always
+uncompressed). `None` is always available. `Zstd` (best ratio) and `Lz4`
+(fastest) are gated behind the `zstd` / `lz4` cargo features; selecting one
+whose feature is not compiled in returns
+[`PersistError::Unsupported`](#errors) at construction. `Zstd { level }`
+requires `level` in `1..=22`. The chosen scheme is recorded on disk, so a
+file written with one scheme loads correctly as long as that scheme's
+feature is enabled at load time.
 
 ```rust
 use iqdb_persist::Compression;
 
-let _ = Compression::None;          // honored in v0.2
-let _ = Compression::Zstd { level: 3 }; // lands in v0.4
-let _ = Compression::Lz4;           // lands in v0.4
+let _ = Compression::None;              // always available
+let _ = Compression::Zstd { level: 3 }; // requires the `zstd` feature
+let _ = Compression::Lz4;               // requires the `lz4` feature
 ```
 
 ---
@@ -702,9 +706,10 @@ same structured error events the rest of the iQDB spine emits, and
 | `InvalidMetric { tag }` | the header's metric tag is not in the known set (`0..=4`). |
 | `UnsupportedMetric { metric }` | on save, a `DistanceMetric` this build has no on-disk tag for (`DistanceMetric` is `#[non_exhaustive]`). |
 | `InvalidIndexType { found, expected }` | the header's index-type tag does not equal the caller's `I::INDEX_TYPE`. |
-| `InvalidPayload { reason }` | the payload decoded structurally wrong — including a `dim` / `metric` / `n_vectors` disagreement between header and reconstructed index. |
+| `InvalidPayload { reason }` | the payload decoded structurally wrong — including a `dim` / `metric` / `n_vectors` disagreement between header and reconstructed index, or a decompression-bomb-sized length claim. |
+| `Compression { reason }` | a compress step rejected its input (e.g. a Zstd level outside `1..=22`) or a decompress step failed / produced the wrong length. Bulk corruption is caught earlier by the CRC32 as `ChecksumMismatch`. |
 | `IndexBuild(IqdbError)` | a downstream `Index::new` / `insert` (called from inside a `load_from` impl) returned an `IqdbError`. |
-| `Unsupported { feature, available_in }` | the config requested a feature this build does not implement yet (`wal_enabled`, compression). |
+| `Unsupported { feature, available_in }` | the config selected a scheme whose cargo feature is not compiled in (`Compression::Zstd` without `zstd`, `Compression::Lz4` without `lz4`). |
 
 ```rust
 use iqdb_persist::PersistError;
@@ -744,6 +749,14 @@ version): `0` Cosine, `1` DotProduct, `2` Euclidean, `3` Manhattan,
 
 The `index_type` length is capped at 4 KiB on read so a corrupt or hostile
 header cannot trigger a giant allocation.
+
+**Format versions.** Version `1` (v0.2–v0.3) stored the payload verbatim.
+Version `2` (v0.4+) prefixes the payload region with a 9-byte compression
+preamble — `[scheme tag u8][uncompressed_len u64 LE]` — followed by the
+(optionally compressed) bytes; the CRC32 covers the whole region, so
+corruption is caught before decompression. The reader accepts both versions
+(a version-1 file loads as uncompressed), so older snapshots remain
+readable. The format is not frozen until v0.5.
 
 ---
 
@@ -825,6 +838,8 @@ atomic-rename byte sequence is identical on both platforms.
 |---------|---------|-------------|
 | `std`   | yes | Standard library. Persistence is effectively `std`-only; the marker exists so a future `no_std` header-parsing subset does not break the surface. |
 | `serde` | no  | Derive `Serialize` / `Deserialize` on [`PersistConfig`](#persistconfig), [`FsyncPolicy`](#fsyncpolicy), and [`Compression`](#compression) so a config can round-trip through a config file. Additive; the on-disk snapshot format is hand-rolled and unaffected. |
+| `zstd`  | no  | Enable `Compression::Zstd` (Zstandard, via the reference C library). Selecting it without this feature returns [`PersistError::Unsupported`](#errors). |
+| `lz4`   | no  | Enable `Compression::Lz4` (LZ4 block format, pure-Rust `lz4_flex`). Selecting it without this feature returns [`PersistError::Unsupported`](#errors). |
 
 ---
 
@@ -836,10 +851,14 @@ atomic-rename byte sequence is identical on both platforms.
 - **Payload-only impls.** A `Persistable` impl writes only the index's own
   bytes; framing (header + CRC32 + atomic write) is centralized here so it
   stays uniform across every index implementation.
-- **Out of scope as of v0.3:** Zstd/LZ4 compression (v0.4) and the external
-  `storage-io` substrate (v0.5+). The `compression` knob already exists and
-  rejects cleanly until then. The WAL appends through its own `std::fs`
-  handle today; it routes through `storage-io` when that lands.
+- **Feature set frozen at v0.4.** Snapshots + CRC32 + atomic writes, the
+  WAL + crash recovery, and Zstd/LZ4 compression are the complete feature
+  surface; v0.5 is `storage-io` integration plus the public-API and
+  on-disk-format freeze, with no new features.
+- **Out of scope:** the external `storage-io` substrate (v0.5+). Snapshot
+  I/O already goes through an internal `Storage` seam; the WAL appends
+  through its own `std::fs` handle today and routes through `storage-io`
+  when that lands.
 
 ---
 

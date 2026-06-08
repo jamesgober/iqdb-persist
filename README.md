@@ -42,6 +42,7 @@
 - **Versioned header** &mdash; magic bytes, format version, index-type tag, dim, metric, vector count. All sizes are fixed-width little-endian `u64`, so a file is portable across 32- and 64-bit hosts.
 - **CRC32 integrity** &mdash; computed over the payload; a single-bit flip surfaces as `ChecksumMismatch` on load, never a panic or a silently-wrong result.
 - **Write-ahead log & crash recovery** &mdash; with `wal_enabled`, every `insert` / `delete` is logged and `fsync`ed *before* it touches memory, then replayed onto the snapshot on `load`. A crash mid-append leaves a torn tail that recovery detects and discards.
+- **Optional compression** &mdash; Zstd or LZ4 on the snapshot payload, behind the `zstd` / `lz4` cargo features. The CRC32 covers the compressed bytes, so corruption is caught before decompression.
 - **Generic over the index** &mdash; `PersistedIndex<I: Index + Persistable>` wraps any concrete index; the framing lives here, the payload bytes live in the index's `Persistable` impl.
 
 <br>
@@ -50,9 +51,15 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.3"
+iqdb-persist = "0.4"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
+```
+
+Snapshot compression is opt-in via cargo features (off by default):
+
+```toml
+iqdb-persist = { version = "0.4", features = ["zstd", "lz4"] }
 ```
 
 <br>
@@ -96,7 +103,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v0.3.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2) and the write-ahead log with replay and crash recovery (v0.3) are implemented and tested. Zstd/LZ4 compression (v0.4) and the external `storage-io` substrate (v0.5+) land in later phases per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>. The `compression` knob already exists and rejects cleanly (`PersistError::Unsupported`) until it ships.
+This is <code>v0.4.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are implemented and tested. The <strong>feature set is now frozen</strong>; the external `storage-io` substrate integrates and the public API + on-disk format freeze at v0.5 per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

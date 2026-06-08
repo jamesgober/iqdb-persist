@@ -39,8 +39,9 @@
 //! - [`FileHeader`] + [`MAGIC`] + [`CURRENT_VERSION`] — the wire format.
 //! - [`PersistConfig`] / [`FsyncPolicy`] / [`Compression`] — configuration.
 //!   `wal_enabled = true` turns on the write-ahead log (v0.3);
-//!   `Compression::Zstd|Lz4` is still rejected with
-//!   [`PersistError::Unsupported`] until v0.4.
+//!   `Compression::Zstd|Lz4` compress the snapshot payload (v0.4, behind
+//!   the `zstd` / `lz4` cargo features — selecting a scheme whose feature
+//!   is off yields [`PersistError::Unsupported`]).
 //! - [`PersistError`] — `#[non_exhaustive]` and `error_forge::ForgeError`-
 //!   integrated.
 //!
@@ -56,11 +57,11 @@
 //!
 //! ## Scope
 //!
-//! v0.2 shipped atomic snapshot save/load + header + CRC32; v0.3 adds the
-//! write-ahead log, replay, and crash recovery (this is the durability
-//! path between snapshots). Compression is scaffolded and lands in v0.4;
-//! the external `storage-io` substrate in v0.5. See `CHANGELOG.md` and
-//! `dev/ROADMAP.md`.
+//! v0.2 shipped atomic snapshot save/load + header + CRC32; v0.3 added the
+//! write-ahead log, replay, and crash recovery; v0.4 adds optional Zstd /
+//! LZ4 snapshot compression and **declares the feature set frozen**. The
+//! external `storage-io` substrate integrates in v0.5. See `CHANGELOG.md`
+//! and `dev/ROADMAP.md`.
 //!
 //! ## Example
 //!
@@ -79,7 +80,7 @@
 //!     n_vectors: 1_000,
 //!     crc32: 0,
 //! };
-//! assert_eq!(header.version, 1);
+//! assert_eq!(header.version, 2);
 //! assert_eq!(&header.magic, b"IQDBPRST");
 //! ```
 
