@@ -18,6 +18,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.5.0] - 2026-06-08
+
+API freeze, on-disk-format freeze, and adversarial hardening.
+
+### Added
+
+- **Adversarial / partial-write test suite** (`tests/adversarial.rs`):
+  exhaustive single-byte-flip and exhaustive truncation of both snapshot
+  and WAL files, plus pseudo-random garbage. The loader never panics, never
+  over-allocates, and never returns a silently-wrong result — a corrupted
+  snapshot is always a clean `Err`, a torn WAL always recovers its intact
+  prefix.
+
+### Changed
+
+- **Public API frozen.** The surface is now the committed SemVer 1.x
+  contract; the full list is recorded in `dev/ROADMAP.md`. No breaking
+  changes before 2.0.
+- **On-disk format frozen.** The snapshot format (version 2) and the WAL
+  format are committed; the metric-tag mapping is fixed; format v1 stays
+  readable. Future changes go through a version bump, never a silent
+  reinterpretation.
+
+### Notes
+
+- `storage-io` integration is **deferred** (recorded in `dev/ROADMAP.md`):
+  the substrate is the renamed `fsys-rs`, and that rename has not happened
+  (the crate is still `fsys`). The internal `Storage` seam is in place, so
+  adopting it later is an internal swap, not an API break. The substrate
+  itself remains out of scope for 1.0.
+
+---
+
 ## [0.4.0] - 2026-06-08
 
 Optional snapshot compression, and the **feature freeze**.
@@ -144,7 +177,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-persist/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/iqdb-persist/compare/v0.1.0...v0.2.0

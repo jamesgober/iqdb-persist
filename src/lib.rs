@@ -58,10 +58,12 @@
 //! ## Scope
 //!
 //! v0.2 shipped atomic snapshot save/load + header + CRC32; v0.3 added the
-//! write-ahead log, replay, and crash recovery; v0.4 adds optional Zstd /
-//! LZ4 snapshot compression and **declares the feature set frozen**. The
-//! external `storage-io` substrate integrates in v0.5. See `CHANGELOG.md`
-//! and `dev/ROADMAP.md`.
+//! write-ahead log, replay, and crash recovery; v0.4 added optional Zstd /
+//! LZ4 snapshot compression and froze the feature set. **As of v0.5 the
+//! public API and the on-disk format are frozen** and the parse/recovery
+//! paths are adversarially hardened. The external `storage-io` substrate is
+//! deferred behind the internal storage seam (see `dev/ROADMAP.md`). See
+//! `CHANGELOG.md`.
 //!
 //! ## Example
 //!

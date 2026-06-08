@@ -51,7 +51,9 @@ pub const MAGIC: [u8; 8] = *b"IQDBPRST";
 ///
 /// Version `1` (v0.2–v0.3) stored the payload verbatim. Version `2` (v0.4+)
 /// prefixes the payload region with a compression preamble; version-1 files
-/// are still read (as uncompressed). The format is not frozen until v0.5.
+/// are still read (as uncompressed). **The format is frozen as of v0.5** —
+/// any future change goes through a version bump, never a silent
+/// reinterpretation.
 ///
 /// # Examples
 ///

@@ -51,7 +51,7 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.4"
+iqdb-persist = "0.5"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -59,7 +59,7 @@ iqdb-types   = "1.0"
 Snapshot compression is opt-in via cargo features (off by default):
 
 ```toml
-iqdb-persist = { version = "0.4", features = ["zstd", "lz4"] }
+iqdb-persist = { version = "0.5", features = ["zstd", "lz4"] }
 ```
 
 <br>
@@ -103,7 +103,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v0.4.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are implemented and tested. The <strong>feature set is now frozen</strong>; the external `storage-io` substrate integrates and the public API + on-disk format freeze at v0.5 per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+This is <code>v0.5.0</code>: atomic snapshot save/load + versioned header + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are implemented and tested. As of v0.5 the <strong>public API and on-disk format are frozen</strong> and the parse/recovery paths are adversarially hardened (exhaustive byte-flip / truncation / garbage). What remains to <code>1.0</code> is the alpha/beta/rc hardening series (0.6–0.9); the external `storage-io` substrate is deferred behind the internal storage seam. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

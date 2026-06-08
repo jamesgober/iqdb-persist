@@ -1,7 +1,12 @@
 # iqdb-persist &mdash; API Reference
 
-> Complete reference for every public item in `iqdb-persist` v0.4.0, with
+> Complete reference for every public item in `iqdb-persist` v0.5.0, with
 > descriptions, parameters, errors, and runnable examples.
+>
+> **As of v0.5 the public API and the on-disk format are frozen** — the
+> surface below is the committed SemVer 1.x contract, and the parse and
+> recovery paths are adversarially hardened (exhaustive byte-flip /
+> truncation / garbage testing).
 
 `iqdb-persist` is the on-disk persistence layer of the iQDB vector
 database. It adds durable snapshot **save** and **load** to any index that
@@ -47,7 +52,7 @@ memory and replayed onto the snapshot on load, so an acknowledged
 
 ```toml
 [dependencies]
-iqdb-persist = "0.4"
+iqdb-persist = "0.5"
 ```
 
 `iqdb-persist` takes its core vocabulary — `DistanceMetric`, `IqdbError`,
@@ -57,7 +62,7 @@ consumer depends on all three:
 
 ```toml
 [dependencies]
-iqdb-persist = "0.4"
+iqdb-persist = "0.5"
 iqdb-index   = "1.0"
 iqdb-types   = "1.0"
 ```
@@ -851,14 +856,15 @@ atomic-rename byte sequence is identical on both platforms.
 - **Payload-only impls.** A `Persistable` impl writes only the index's own
   bytes; framing (header + CRC32 + atomic write) is centralized here so it
   stays uniform across every index implementation.
-- **Feature set frozen at v0.4.** Snapshots + CRC32 + atomic writes, the
-  WAL + crash recovery, and Zstd/LZ4 compression are the complete feature
-  surface; v0.5 is `storage-io` integration plus the public-API and
-  on-disk-format freeze, with no new features.
-- **Out of scope:** the external `storage-io` substrate (v0.5+). Snapshot
-  I/O already goes through an internal `Storage` seam; the WAL appends
-  through its own `std::fs` handle today and routes through `storage-io`
-  when that lands.
+- **Frozen at v0.5.** The feature set (snapshots + CRC32 + atomic writes,
+  WAL + crash recovery, Zstd/LZ4 compression), the public API above, and
+  the on-disk format are all committed. Remaining work to 1.0 is the
+  alpha/beta/rc hardening series — no new surface.
+- **Out of scope:** the external `storage-io` substrate. Snapshot I/O
+  already goes through an internal `Storage` seam; the WAL appends through
+  its own `std::fs` handle. `storage-io` is the renamed `fsys-rs`; until
+  that rename lands the integration is deferred, and when it does it is an
+  internal swap behind the seam, not an API change.
 
 ---
 

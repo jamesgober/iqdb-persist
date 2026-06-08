@@ -38,15 +38,51 @@ Exit criteria:
 Feature freeze: as of v0.4 the persistence feature set is complete —
 snapshots + header + CRC32 (v0.2), WAL + replay + crash recovery (v0.3),
 and optional Zstd/LZ4 snapshot compression (v0.4). No new features land
-before 1.0; remaining work is `storage-io` integration + the API/format
-freeze (v0.5) and hardening (0.6–0.9).
+before 1.0; remaining work is the API/format freeze + adversarial hardening
+(v0.5) and the alpha/beta/rc series (0.6–0.9). `storage-io` integration is
+deferred behind the internal `Storage` seam (see v0.5).
 
 ---
 
-## v0.5.0 -- storage-io integration + adversarial/partial-write tests + API freeze
+## v0.5.0 -- adversarial/partial-write tests + API freeze + format freeze (DONE)
 
 Exit criteria:
-- [ ] Public API frozen (recorded here). `cargo audit` + `cargo deny` clean.
+- [x] Public API frozen (recorded below). `cargo audit` + `cargo deny` clean.
+- [x] Adversarial/partial-write hardening: exhaustive single-byte-flip and
+      truncation of snapshot and WAL files, plus pseudo-random garbage —
+      the loader never panics, never OOMs, and never returns a
+      silently-wrong result.
+
+### Deferred (anti-deferral record)
+
+`storage-io` integration is **deferred past 1.0 with rationale**: the
+substrate is the renamed `fsys-rs`, and that rename has not happened
+(the crate is still `fsys` 1.1.0). "Out of scope for 1.0" already lists the
+substrate itself. The internal `Storage` trait is the swap seam and is in
+place; when `storage-io` ships, snapshot I/O moves behind it and the WAL's
+`std::fs` handle follows — an internal change, not an API break.
+
+### Frozen public API (SemVer 1.x surface)
+
+- `trait Persistable: Index` — `const INDEX_TYPE`, `save_to`, `load_from`.
+- `struct PersistedIndex<I>` — `open_with`, `load`, `index`, `index_mut`,
+  `config`, `insert`, `delete`, `save`, `checkpoint`.
+- `struct PersistConfig { path, wal_enabled, fsync_policy, compression }`
+  — `new`, `Default`.
+- `enum FsyncPolicy { Always, Periodic(Duration), Never }`.
+- `enum Compression { None, Zstd { level }, Lz4 }`.
+- `enum PersistError` (`#[non_exhaustive]`) + `type Result<T>`.
+- `struct FileHeader`, `const MAGIC`, `const CURRENT_VERSION`,
+  `mod format` (`read_header`, `write_header`), `mod checksum`
+  (`compute`, `verify`), `const VERSION`.
+
+### Frozen on-disk format
+
+Snapshot format **version 2** (header layout + compression preamble +
+payload CRC32) and the **WAL format** (`IQDBWAL\0` framing, per-record
+CRC32) are frozen; the metric-tag mapping (`0..=4`) is fixed. The reader
+keeps accepting format v1 for backward compatibility. Any future change
+goes through a version bump, never a silent reinterpretation.
 
 ---
 
