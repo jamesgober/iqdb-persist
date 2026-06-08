@@ -18,18 +18,18 @@
 
 <div align="left">
     <p>
-        <strong>iqdb-persist</strong> is what moves iQDB from demo-only to actually usable: it serializes indexes and vectors to disk, logs mutations to a WAL, and recovers cleanly after a crash.
+        <strong>iqdb-persist</strong> is what moves iQDB from demo-only to actually usable: it adds durable snapshot <strong>save</strong> and <strong>load</strong> to any index, behind a versioned file header, a CRC32 integrity check, and an atomic write that never corrupts an existing good file.
     </p>
     <p>
-        It is the embedded persistence layer and is designed to sit on the <code>storage-io</code> substrate (the renamed <code>fsys-rs</code>) rather than touching files directly.
+        It is the embedded persistence layer, generic over any type that implements <code>iqdb_index::Index</code>, and designed to sit on the <code>storage-io</code> substrate (the renamed <code>fsys-rs</code>) rather than touching files directly.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Atomic saves. WAL recovery. Versioned on-disk format.
+        <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Atomic saves. Versioned, portable on-disk format. CRC32 integrity.
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -38,12 +38,10 @@
 
 <h2>What it does</h2>
 
-- **On-disk format** &mdash; versioned file header, magic, CRC32 integrity per index type
-- **Atomic save/load** &mdash; write-to-temp-then-rename; a partial write never corrupts data
-- **WAL** &mdash; write-ahead log: every mutation logged before memory, replayed on startup
-- **Crash recovery** &mdash; detect partial writes, replay the WAL
-- **Optional compression** &mdash; zstd or lz4
-
+- **Atomic snapshot save/load** &mdash; write-to-temp + `fsync` + atomic rename + directory `fsync`; an interrupted write never corrupts an existing good file.
+- **Versioned header** &mdash; magic bytes, format version, index-type tag, dim, metric, vector count. All sizes are fixed-width little-endian `u64`, so a file is portable across 32- and 64-bit hosts.
+- **CRC32 integrity** &mdash; computed over the payload; a single-bit flip surfaces as `ChecksumMismatch` on load, never a panic or a silently-wrong result.
+- **Generic over the index** &mdash; `PersistedIndex<I: Index + Persistable>` wraps any concrete index; the framing lives here, the payload bytes live in the index's `Persistable` impl.
 
 <br>
 
@@ -51,27 +49,53 @@
 
 ```toml
 [dependencies]
-iqdb-persist = "0.1"
+iqdb-persist = "0.2"
+iqdb-index   = "1.0"
+iqdb-types   = "1.0"
 ```
+
+<br>
+
+## Quick start
+
+```rust
+use iqdb_persist::{PersistConfig, PersistedIndex};
+
+// `MyIndex: iqdb_index::Index + iqdb_persist::Persistable`
+let cfg = PersistConfig::new("/var/lib/app/index.iqdb");
+
+// Wrap an in-memory index and save it atomically.
+let wrapped = PersistedIndex::open_with(my_index, cfg.clone())?;
+wrapped.save()?;
+
+// Later — reconstruct it from disk (verifies magic, version, type, CRC32).
+let restored: PersistedIndex<MyIndex> = PersistedIndex::load(cfg)?;
+let index = restored.index();
+```
+
+An index opts in by implementing the two-method `Persistable` trait. A
+complete, runnable version lives in
+[`examples/save_and_load.rs`](./examples/save_and_load.rs) &mdash; run it
+with `cargo run --example save_and_load`. Full reference:
+[`docs/API.md`](./docs/API.md).
 
 <br>
 
 ## Status
 
-This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates are in place; the implementation lands across the 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a> and <a href="./docs/API.md"><code>docs/API.md</code></a>.
+This is <code>v0.2.0</code>: atomic snapshot save/load, the versioned header, and CRC32 integrity are implemented and tested. WAL append/replay (v0.3), Zstd/LZ4 compression (v0.4), and the external `storage-io` substrate (v0.5+) land in later phases per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>. The `PersistConfig` knobs for those features already exist and reject cleanly (`PersistError::Unsupported`) until they ship.
 
 <hr>
 <br>
 
 ## Where It Fits
 
-`iqdb-persist` is a Phase-5 embedded crate. It builds on:
+`iqdb-persist` is the embedded persistence crate of the iQDB family. It builds on:
 
-- `iqdb-types` &mdash; core types
-- `iqdb-index` &mdash; wraps any index as persistable
-- `storage-io` &mdash; disk I/O substrate (integration pending the fsys-rs rename)
+- `iqdb-types` &mdash; core vocabulary (`DistanceMetric`, `IqdbError`)
+- `iqdb-index` &mdash; the `Index` / `IndexCore` traits it wraps as persistable
 
-Storage substrate (`storage-io`) wiring is pending the `fsys-rs` -> `storage-io` rename; the scaffold builds without it.
+All file I/O goes through a tiny internal `Storage` seam so the future `storage-io` substrate (the `fsys-rs` rename) can drop in unchanged; v0.2 ships one impl over `std::fs`.
 
 <br>
 

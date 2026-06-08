@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "iqdb-persist"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.87"
@@ -22,14 +22,14 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Disk persistence, WAL, and crash recovery for iQDB indexes - part of the iQDB family."
+description = "Atomic snapshot persistence with versioned headers and CRC32 integrity for iQDB indexes - part of the iQDB family."
 
 # Keywords (5 max)
 keywords = [
     "persistence",
-    "wal",
+    "snapshot",
     "vector-database",
-    "recovery",
+    "crc32",
     "iqdb"
 ]
 
@@ -46,7 +46,8 @@ documentation = "https://docs.rs/iqdb-persist"
 
 # Authors
 authors = [
-    "James Gober <me@jamesgober.com>"
+    "James Gober <me@jamesgober.com>",
+    "Matt Callahan <matthewcallahan01@icloud.com>"
 ]
 
 [package.metadata.docs.rs]
@@ -62,22 +63,42 @@ path = "src/lib.rs"
 # #################################
 [features]
 default = ["std"]
-# Standard library.
+# Standard library. Persistence is effectively std-only (file I/O,
+# std::path, std::sync); the marker exists so a future no_std subset
+# (header parsing in embedded contexts) does not break the surface.
 std = []
-# Serialization support.
+# Derive `serde::{Serialize, Deserialize}` on the public config types so
+# `PersistConfig` can round-trip through a config file. Additive; the
+# on-disk snapshot format itself is hand-rolled and unaffected.
 serde = ["dep:serde"]
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
+# Shared iQDB vocabulary: DistanceMetric, IqdbError.
+iqdb-types  = "1.0.0"
+# The Index / IndexCore traits the persisted index is generic over.
+iqdb-index  = "1.0.0"
+# `ForgeError` trait: kind()/caption() so PersistError composes into the
+# same structured error events the rest of the spine emits.
+error-forge = "1.0.0"
+# Tracing facade only. Instrumented at the save boundary; the byte-level
+# header/payload paths stay free of any tracing call.
+tracing     = { version = "0.1", default-features = false, features = ["attributes", "std"] }
+# CRC32 over the on-disk payload. SIMD-accelerated (runtime-detected).
+crc32fast   = "1.4"
+# Optional, additive serialization for the config types.
+serde       = { version = "1", optional = true, features = ["derive"] }
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
+# Property-based tests for header round-trip invariants.
 proptest = "1"
+# Temp dirs / files for atomic-save and CRC-mismatch integration tests.
+tempfile = "3"
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
