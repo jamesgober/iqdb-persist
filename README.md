@@ -29,7 +29,7 @@
         <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Atomic saves. Versioned, portable on-disk format. CRC32 integrity.
     </p>
     <blockquote>
-        <strong>Status: stable (v1.0.0).</strong> The public API and on-disk format are frozen under the SemVer 1.x guarantee — no breaking changes before 2.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: stable (v1.0.1).</strong> The public API and on-disk format are frozen under the SemVer 1.x guarantee — no breaking changes before 2.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -41,7 +41,7 @@
 - **Atomic snapshot save/load** &mdash; write-to-temp + `fsync` + atomic rename + directory `fsync`; an interrupted write never corrupts an existing good file.
 - **Versioned header** &mdash; magic bytes, format version, index-type tag, dim, metric, vector count. All sizes are fixed-width little-endian `u64`, so a file is portable across 32- and 64-bit hosts.
 - **CRC32 integrity** &mdash; computed over the payload; a single-bit flip surfaces as `ChecksumMismatch` on load, never a panic or a silently-wrong result.
-- **Write-ahead log & crash recovery** &mdash; with `wal_enabled`, every `insert` / `delete` is logged and `fsync`ed *before* it touches memory, then replayed onto the snapshot on `load`. A crash mid-append leaves a torn tail that recovery detects and discards.
+- **Write-ahead log & crash recovery** &mdash; with `wal_enabled`, every `insert` / `delete` is logged and `fsync`ed *before* it touches memory, then replayed onto the snapshot on `load`. A crash mid-append leaves a torn tail that recovery detects, discards, and cuts from the log before new writes land.
 - **Optional compression** &mdash; Zstd or LZ4 on the snapshot payload, behind the `zstd` / `lz4` cargo features. The CRC32 covers the compressed bytes, so corruption is caught before decompression.
 - **Generic over the index** &mdash; `PersistedIndex<I: Index + Persistable>` wraps any concrete index; the framing lives here, the payload bytes live in the index's `Persistable` impl.
 
@@ -103,7 +103,7 @@ with `cargo run --example save_and_load`. Full reference:
 
 ## Status
 
-This is <code>v1.0.0</code> — <strong>stable</strong>. Atomic snapshots + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are complete; the API and on-disk format were frozen at v0.5 and the parse/recovery paths adversarially hardened; v0.6 added property tests for the core invariants. The public API and on-disk format are now committed under the SemVer 1.x guarantee — no breaking changes before 2.0. The external `storage-io` substrate is out of scope for 1.0, deferred behind the internal storage seam (an internal swap when it lands, not an API change). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+This is <code>v1.0.1</code> — <strong>stable</strong>. v1.0.1 fixes write-ahead log recovery after a torn tail, makes replay safe over a snapshot that already holds logged writes, and bounds snapshot decompression. Atomic snapshots + CRC32 (v0.2), the write-ahead log with replay and crash recovery (v0.3), and optional Zstd/LZ4 snapshot compression (v0.4) are complete; the API and on-disk format were frozen at v0.5 and the parse/recovery paths adversarially hardened; v0.6 added property tests for the core invariants. The public API and on-disk format are now committed under the SemVer 1.x guarantee — no breaking changes before 2.0. The external `storage-io` substrate is out of scope for 1.0, deferred behind the internal storage seam (an internal swap when it lands, not an API change). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

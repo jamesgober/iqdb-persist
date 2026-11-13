@@ -11,13 +11,14 @@ use std::sync::Arc;
 use iqdb_index::{Index, IndexCore, IndexStats};
 use iqdb_persist::{PersistConfig, PersistError, Persistable, PersistedIndex, Result};
 use iqdb_types::{
-    DistanceMetric, Hit, Metadata, Result as IqdbResult, SearchParams, Value, VectorId,
+    DistanceMetric, Hit, IqdbError, Metadata, Result as IqdbResult, SearchParams, Value, VectorId,
 };
 
 // ---------------------------------------------------------------------------
 // A storing mock index: keeps real rows so recovery is observable. The
 // snapshot payload serialises ids + vectors (not metadata); metadata is
-// carried by the WAL and verified through the replay path.
+// carried by the WAL and verified through the replay path. Like the real
+// index crates, it rejects a duplicate insert and an absent-id delete.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -41,11 +42,18 @@ impl StoreIndex {
 
 impl IndexCore for StoreIndex {
     fn insert(&mut self, id: VectorId, v: Arc<[f32]>, m: Option<Metadata>) -> IqdbResult<()> {
+        if self.rows.iter().any(|(rid, _, _)| rid == &id) {
+            return Err(IqdbError::Duplicate);
+        }
         self.rows.push((id, v, m));
         Ok(())
     }
     fn delete(&mut self, id: &VectorId) -> IqdbResult<()> {
+        let before = self.rows.len();
         self.rows.retain(|(rid, _, _)| rid != id);
+        if self.rows.len() == before {
+            return Err(IqdbError::NotFound);
+        }
         Ok(())
     }
     fn search(&self, _q: &[f32], _p: &SearchParams) -> IqdbResult<Vec<Hit>> {
@@ -347,4 +355,149 @@ fn snapshot_only_mode_ignores_wal_api_durability() {
     let restored: PersistedIndex<StoreIndex> =
         PersistedIndex::load(PersistConfig::new(&path)).unwrap();
     assert_eq!(restored.index().len(), 1);
+}
+
+fn sorted_ids(db: &PersistedIndex<StoreIndex>) -> Vec<u64> {
+    let mut ids: Vec<u64> = db
+        .index()
+        .ids()
+        .into_iter()
+        .map(|id| match id {
+            VectorId::U64(n) => n,
+            VectorId::Bytes(_) => u64::MAX,
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn writes_after_torn_tail_recovery_survive_the_next_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idx.iqdb");
+
+    {
+        let index = StoreIndex::new(2, DistanceMetric::Euclidean, ()).unwrap();
+        let mut db = PersistedIndex::open_with(index, wal_cfg(&path)).unwrap();
+        db.insert(VectorId::from(1u64), vec(&[1.0, 0.0]), None)
+            .unwrap();
+    }
+
+    // First crash: a partial frame head at the end of the log.
+    let wp = wal_path(&path);
+    let mut f = std::fs::OpenOptions::new().append(true).open(&wp).unwrap();
+    f.write_all(&[0x10, 0x00, 0x00]).unwrap();
+    drop(f);
+
+    {
+        let mut db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+        assert_eq!(sorted_ids(&db), vec![1]);
+        db.insert(VectorId::from(2u64), vec(&[0.0, 1.0]), None)
+            .unwrap();
+        db.insert(VectorId::from(3u64), vec(&[1.0, 1.0]), None)
+            .unwrap();
+        db.delete(&VectorId::from(1u64)).unwrap();
+        // Second crash: drop without a checkpoint.
+    }
+
+    let db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+    assert_eq!(sorted_ids(&db), vec![2, 3]);
+}
+
+#[test]
+fn torn_tail_is_cut_from_the_file_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idx.iqdb");
+
+    {
+        let index = StoreIndex::new(2, DistanceMetric::Euclidean, ()).unwrap();
+        let mut db = PersistedIndex::open_with(index, wal_cfg(&path)).unwrap();
+        db.insert(VectorId::from(1u64), vec(&[1.0, 0.0]), None)
+            .unwrap();
+    }
+    let wp = wal_path(&path);
+    let intact = std::fs::metadata(&wp).unwrap().len();
+    let mut f = std::fs::OpenOptions::new().append(true).open(&wp).unwrap();
+    f.write_all(&[0xAB; 7]).unwrap();
+    drop(f);
+
+    let _db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+    assert_eq!(std::fs::metadata(&wp).unwrap().len(), intact);
+}
+
+#[test]
+fn torn_header_is_rewritten_and_later_writes_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idx.iqdb");
+
+    {
+        let index = StoreIndex::new(2, DistanceMetric::Euclidean, ()).unwrap();
+        let _db = PersistedIndex::open_with(index, wal_cfg(&path)).unwrap();
+    }
+    // A crash while the header itself was being written.
+    std::fs::write(wal_path(&path), b"IQDB").unwrap();
+
+    {
+        let mut db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+        assert_eq!(db.index().len(), 0);
+        db.insert(VectorId::from(9u64), vec(&[1.0, 2.0]), None)
+            .unwrap();
+    }
+    let db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+    assert_eq!(sorted_ids(&db), vec![9]);
+}
+
+#[test]
+fn save_in_wal_mode_then_load_does_not_fail_on_repeated_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idx.iqdb");
+
+    {
+        let index = StoreIndex::new(2, DistanceMetric::Euclidean, ()).unwrap();
+        let mut db = PersistedIndex::open_with(index, wal_cfg(&path)).unwrap();
+        db.insert(VectorId::from(7u64), vec(&[1.0, 2.0]), None)
+            .unwrap();
+        // The snapshot now holds id 7 while the log still records its insert.
+        db.save().unwrap();
+    }
+    let db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+    assert_eq!(sorted_ids(&db), vec![7]);
+}
+
+#[test]
+fn replay_onto_a_snapshot_at_any_point_of_the_log_reaches_the_same_state() {
+    // The same history, with a WAL-mode save() taken after each step. A crash
+    // between a checkpoint's rename and its log reset leaves the same
+    // overlap. Every variant must load to the final state.
+    let steps: Vec<(bool, u64)> = vec![
+        (true, 1),
+        (true, 2),
+        (false, 1),
+        (true, 3),
+        (true, 1),
+        (false, 2),
+        (false, 3),
+        (true, 2),
+    ];
+    for save_after in 0..steps.len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.iqdb");
+        {
+            let index = StoreIndex::new(2, DistanceMetric::Euclidean, ()).unwrap();
+            let mut db = PersistedIndex::open_with(index, wal_cfg(&path)).unwrap();
+            for (i, &(insert, id)) in steps.iter().enumerate() {
+                if insert {
+                    let v = id as f32;
+                    db.insert(VectorId::from(id), vec(&[v, v]), None).unwrap();
+                } else {
+                    db.delete(&VectorId::from(id)).unwrap();
+                }
+                if i == save_after {
+                    db.save().unwrap();
+                }
+            }
+        }
+        let db: PersistedIndex<StoreIndex> = PersistedIndex::load(wal_cfg(&path)).unwrap();
+        assert_eq!(sorted_ids(&db), vec![1, 2], "save after step {save_after}");
+    }
 }

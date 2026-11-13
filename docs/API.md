@@ -435,9 +435,12 @@ to empty — the WAL-mode compaction operation. After a checkpoint the
 snapshot alone captures the full state, so the log can be reset; this
 bounds WAL growth and prevents a later [`load`](#persistedindex--construction)
 from double-counting mutations. In snapshot-only mode it is equivalent to
-`save`. **In WAL mode use `checkpoint`, not bare `save`:** `save` alone
-leaves the WAL in place, so the next `load` would replay logged mutations
-on top of a snapshot that already contains them.
+`save`. **In WAL mode prefer `checkpoint` to bare `save`:** `save` alone
+leaves the WAL in place, so it keeps growing. Loading a snapshot together
+with a log that repeats some of its mutations is safe: replay skips an
+insert the index already holds and a delete of an id it no longer holds, so
+the result is the same state the log describes. The same holds after a crash
+between a checkpoint's snapshot rename and its log reset.
 
 - **Errors:** [`PersistError::Io`](#errors) if the temp write, rename, or
   `fsync` fails (and, for `checkpoint`, if truncating the WAL fails); any
@@ -541,6 +544,12 @@ whose feature is not compiled in returns
 requires `level` in `1..=22`. The chosen scheme is recorded on disk, so a
 file written with one scheme loads correctly as long as that scheme's
 feature is enabled at load time.
+
+On load, decompression is bounded by the length the payload records: Zstd is
+decoded as a stream and stopped one byte past that length, so a frame that
+expands further fails without ever being held in memory, and an LZ4 claim
+larger than the block format can produce from the stored bytes (255 to 1) is
+rejected before the decoder reserves it.
 
 ```rust
 use iqdb_persist::Compression;
@@ -798,13 +807,24 @@ the snapshot, then replays every committed frame onto it.
 mid-append leaves a **torn tail** — a truncated or mis-checksummed final
 frame — which replay detects and discards: that mutation was never
 acknowledged, so dropping it is correct. A frame that fails its CRC32 but
-sits before intact frames stops replay there. A frame that passes its CRC32
+sits before intact frames stops replay there. `load` then cuts the log back
+to the end of the last intact frame and `fsync`s it before appending, so
+every mutation acknowledged after a recovery is replayed by the next one. A frame that passes its CRC32
 yet does not decode is a genuine corruption and surfaces as
 [`PersistError::InvalidPayload`](#errors).
 
 **Rollback.** `insert` / `delete` log before applying; if the in-memory
-apply is then rejected, the just-written frame is truncated away, so the
-log never contains a mutation the index does not.
+apply is then rejected, or the append itself fails part-way (a full disk,
+an I/O error), the just-written bytes are truncated away, so the log never
+contains a mutation the index does not. If even that truncation fails, the
+log refuses further appends until it is reopened.
+
+**Replay is idempotent.** A duplicate insert or a delete of an absent id
+during replay means the snapshot already reflects that mutation, so replay
+skips it instead of failing the load. The log only holds mutations that
+applied cleanly, so for each id it alternates between inserts and deletes,
+and the skip reaches the same final state however much of the log the
+snapshot already covers.
 
 ---
 
