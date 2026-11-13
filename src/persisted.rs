@@ -222,9 +222,20 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         };
         if this.config.wal_enabled {
             // Replay the deltas the WAL recorded after this snapshot, then
-            // re-open the same WAL for continued appends at its end.
-            let _applied = recovery::replay(&this.config.path, &mut this.inner)?;
-            let wal = Wal::open_for_append(&this.config.path, this.config.fsync_policy)?;
+            // re-open the same WAL for continued appends. A torn tail left
+            // by a crash is cut off (and fsynced) first, so the records
+            // appended from here on are visible to the next load.
+            let replayed = recovery::replay(&this.config.path, &mut this.inner)?;
+            tracing::debug!(
+                applied = replayed.applied,
+                skipped = replayed.skipped,
+                "write-ahead log replayed",
+            );
+            let wal = Wal::open_for_append(
+                &this.config.path,
+                this.config.fsync_policy,
+                replayed.valid_len,
+            )?;
             this.wal = Some(wal);
         }
         Ok(this)
@@ -260,9 +271,9 @@ impl<I: Index + Persistable> PersistedIndex<I> {
     /// [`load`](Self::load). In snapshot-only mode it applies to memory
     /// directly (durability comes from the next [`save`](Self::save)).
     ///
-    /// If the in-memory apply is rejected (for example a duplicate id), the
-    /// just-logged record is rolled back so the WAL stays exactly in step
-    /// with the index.
+    /// If the in-memory apply is rejected (for example a duplicate id), or
+    /// the append itself fails part-way, the just-logged record is rolled
+    /// back so the WAL stays exactly in step with the index.
     ///
     /// # Errors
     ///
@@ -280,7 +291,12 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         match wal {
             Some(w) => {
                 let mark = w.mark()?;
-                w.append_insert(&id, &vector, meta.as_ref())?;
+                if let Err(e) = w.append_insert(&id, &vector, meta.as_ref()) {
+                    // Best effort: the append already undid a partial
+                    // frame; this also drops a frame whose fsync failed.
+                    let _undo = w.rollback(mark);
+                    return Err(e);
+                }
                 match inner.insert(id, vector, meta) {
                     Ok(()) => Ok(()),
                     Err(e) => {
@@ -309,7 +325,10 @@ impl<I: Index + Persistable> PersistedIndex<I> {
         match wal {
             Some(w) => {
                 let mark = w.mark()?;
-                w.append_delete(id)?;
+                if let Err(e) = w.append_delete(id) {
+                    let _undo = w.rollback(mark);
+                    return Err(e);
+                }
                 match inner.delete(id) {
                     Ok(()) => Ok(()),
                     Err(e) => {
@@ -328,10 +347,12 @@ impl<I: Index + Persistable> PersistedIndex<I> {
     /// Write a snapshot of the current state to `self.config.path`
     /// atomically.
     ///
-    /// In WAL mode this does **not** truncate the log — prefer
-    /// [`checkpoint`](Self::checkpoint), which writes a snapshot *and*
-    /// resets the WAL so the two never double-count a mutation on the next
-    /// [`load`](Self::load).
+    /// In WAL mode this does **not** truncate the log, so the log keeps
+    /// growing; prefer [`checkpoint`](Self::checkpoint), which writes a
+    /// snapshot *and* resets the WAL. Loading a snapshot together with a
+    /// log that repeats some of its mutations is safe: replay skips an
+    /// insert the index already holds and a delete of an id it no longer
+    /// holds.
     ///
     /// # Errors
     ///

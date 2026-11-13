@@ -8,13 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Added
-
-### Changed
+Planned as 1.0.1. No API or on-disk format changes.
 
 ### Fixed
 
+- Writes made after recovering from a torn write-ahead log tail were lost on
+  the next restart. Recovery dropped the partial frame from replay but left
+  its bytes in the file, so new frames were appended behind it and the next
+  load stopped at the same spot. `load` now cuts the log back to the end of
+  the last intact frame and `fsync`s it before appending.
+- An append that fails part-way (a full disk, an I/O error) is now truncated
+  away before the error is returned, so it cannot hide the frames written
+  after it. If the truncation also fails, the log refuses further appends
+  until it is reopened.
+- Loading a snapshot together with a log that repeats some of its mutations
+  failed with `IndexBuild(Duplicate)` on every attempt. This happened after
+  a WAL-mode `save()`, or a crash between a checkpoint's snapshot rename and
+  its log reset. Replay now skips an insert the index already holds and a
+  delete of an id it no longer holds, which reaches the same final state.
+
 ### Security
+
+- Zstd snapshot payloads are decoded as a stream and stopped one byte past
+  the recorded length. Before, the whole frame was decoded first, so a small
+  file could expand to gigabytes before the length check ran.
+- An LZ4 payload that claims more output than the block format can produce
+  from its stored bytes (255 to 1) is rejected before the decoder reserves
+  that much memory. The old bound allowed 4096 to 1.
 
 ---
 

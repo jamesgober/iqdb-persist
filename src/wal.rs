@@ -26,7 +26,9 @@
 //! Each frame carries its own length and CRC32, so a crash mid-append
 //! leaves a **torn tail** that replay detects and discards: the truncated
 //! or mis-checksummed final frame was never durably committed, so dropping
-//! it is correct. Frames before it are intact and replay in order.
+//! it is correct. Frames before it are intact and replay in order. Recovery
+//! also cuts the torn bytes off the file (and `fsync`s) before any new frame
+//! is appended, so later frames never sit behind a broken one.
 //!
 //! ## Record bodies
 //!
@@ -74,6 +76,9 @@ const VAL_FLOAT: u8 = 2;
 const VAL_BOOL: u8 = 3;
 const VAL_NULL: u8 = 4;
 
+/// Length of the fixed WAL file header (magic + version).
+const WAL_HEADER_LEN: u64 = 12;
+
 /// Cap on a single WAL record so a corrupt length field cannot trigger a
 /// giant read. 256 MiB is far above any realistic single vector + metadata.
 const MAX_RECORD_LEN: usize = 256 * 1024 * 1024;
@@ -95,6 +100,10 @@ pub(crate) struct Wal {
     // Reused across appends so the steady-state insert path makes no
     // per-call framing allocation beyond growing this buffer once.
     scratch: Vec<u8>,
+    // Set when a failed append could not be undone. A frame written after
+    // a partial one would be unreachable on the next load, so every later
+    // append is refused until the log is reopened (which truncates it).
+    broken: bool,
 }
 
 impl Wal {
@@ -118,6 +127,7 @@ impl Wal {
             policy,
             last_fsync: None,
             scratch: Vec::with_capacity(256),
+            broken: false,
         };
         wal.write_header()?;
         wal.sync_now()?;
@@ -127,21 +137,25 @@ impl Wal {
     /// Open an existing WAL beside `snapshot` for continued appends,
     /// positioned at the end. Used after [`crate::recovery::replay`] on
     /// load. A header is written if the file did not already exist.
-    pub(crate) fn open_for_append(snapshot: &Path, policy: FsyncPolicy) -> Result<Self> {
+    ///
+    /// `valid_len` is the byte length of the intact prefix that replay
+    /// parsed (see [`parse_log`]), or `None` when there was no file.
+    /// Anything past it is a torn tail from a crash or a failed write. It
+    /// is cut off and the file is `fsync`ed before the first new append, so
+    /// new frames never land behind bytes that would hide them on the next
+    /// load.
+    pub(crate) fn open_for_append(
+        snapshot: &Path,
+        policy: FsyncPolicy,
+        valid_len: Option<u64>,
+    ) -> Result<Self> {
         let path = wal_path(snapshot);
-        let existed = path.exists();
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&path)
-            .map_err(|source| PersistError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        let _end = file
-            .seek(SeekFrom::End(0))
             .map_err(|source| PersistError::Io {
                 path: path.clone(),
                 source,
@@ -152,9 +166,27 @@ impl Wal {
             policy,
             last_fsync: None,
             scratch: Vec::with_capacity(256),
+            broken: false,
         };
-        if !existed {
+        let on_disk = wal.file.metadata().map_err(|source| wal.io(source))?.len();
+        // A missing or half-written header means nothing was committed:
+        // start the file over with a fresh header.
+        let keep = match valid_len {
+            Some(n) if n >= WAL_HEADER_LEN => n.min(on_disk),
+            _ => 0,
+        };
+        if keep < on_disk {
+            tracing::warn!(
+                path = %wal.path.display(),
+                discarded_bytes = on_disk - keep,
+                "discarding torn write-ahead log tail",
+            );
+        }
+        wal.truncate_to(keep)?;
+        if keep == 0 {
             wal.write_header()?;
+        }
+        if keep == 0 || keep < on_disk {
             wal.sync_now()?;
         }
         Ok(wal)
@@ -219,14 +251,27 @@ impl Wal {
     }
 
     /// Truncate the WAL back to `mark`, discarding a record that was logged
-    /// but whose in-memory apply failed.
+    /// but whose in-memory apply failed, or whose append failed part-way.
+    ///
+    /// If the truncation itself fails, the log is marked unusable: every
+    /// later append returns an error instead of writing behind bytes that
+    /// would hide it on the next load.
     pub(crate) fn rollback(&mut self, mark: u64) -> Result<()> {
-        self.file.set_len(mark).map_err(|source| self.io(source))?;
+        let result = self.truncate_to(mark).and_then(|()| self.sync_now());
+        if result.is_err() {
+            self.broken = true;
+        }
+        result
+    }
+
+    /// Cut the file to `len` bytes and position the cursor at its end.
+    fn truncate_to(&mut self, len: u64) -> Result<()> {
+        self.file.set_len(len).map_err(|source| self.io(source))?;
         let _pos = self
             .file
-            .seek(SeekFrom::Start(mark))
+            .seek(SeekFrom::Start(len))
             .map_err(|source| self.io(source))?;
-        self.sync_now()
+        Ok(())
     }
 
     fn write_header(&mut self) -> Result<()> {
@@ -244,6 +289,11 @@ impl Wal {
     /// Frame and write `self.scratch` (the record body): a `len(u32) +
     /// crc32(u32)` head followed by the body, then `fsync` per policy.
     fn commit_record(&mut self) -> Result<()> {
+        if self.broken {
+            return Err(self.io(std::io::Error::other(
+                "write-ahead log is unusable after a failed write; reopen it to recover",
+            )));
+        }
         let body_len =
             u32::try_from(self.scratch.len()).map_err(|_| PersistError::InvalidPayload {
                 reason: "WAL record length does not fit in u32",
@@ -252,18 +302,23 @@ impl Wal {
         let mut frame_head = [0u8; 8];
         frame_head[..4].copy_from_slice(&body_len.to_le_bytes());
         frame_head[4..].copy_from_slice(&crc.to_le_bytes());
-        self.file
+        let start = self
+            .file
+            .stream_position()
+            .map_err(|source| self.io(source))?;
+        let written = self
+            .file
             .write_all(&frame_head)
-            .map_err(|source| PersistError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
-        self.file
-            .write_all(&self.scratch)
-            .map_err(|source| PersistError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
+            .and_then(|()| self.file.write_all(&self.scratch));
+        if let Err(source) = written {
+            // A partial frame (disk full, I/O error) must not stay in the
+            // log: the next load would stop at it and never see the frames
+            // written after it.
+            if self.truncate_to(start).is_err() {
+                self.broken = true;
+            }
+            return Err(self.io(source));
+        }
         self.maybe_sync()
     }
 
@@ -378,16 +433,29 @@ pub(crate) enum WalRecord {
 
 /// Parse every intact frame in a WAL byte image, in append order.
 ///
-/// A torn tail (a final frame that is truncated or fails its CRC32) is
-/// silently dropped — it was never durably committed. Returns
-/// [`PersistError::BadMagic`] / [`PersistError::UnsupportedVersion`] for a
-/// non-WAL or wrong-version file, and [`PersistError::InvalidPayload`] for
-/// a frame that passes its CRC32 but does not decode (a corrupt-yet-
-/// checksum-valid record — a real defect, not a crash artifact).
+/// Shorthand for [`parse_log`] that drops the intact-prefix length.
+#[cfg(test)]
 pub(crate) fn parse_records(bytes: &[u8]) -> Result<Vec<WalRecord>> {
+    parse_log(bytes).map(|(records, _)| records)
+}
+
+/// Parse every intact frame in a WAL byte image, in append order, and
+/// return them with the byte length of the intact prefix (the header plus
+/// every good frame).
+///
+/// A torn tail (a final frame that is truncated or fails its CRC32) is
+/// dropped: it was never durably committed. The returned length points at
+/// its first byte so the caller can cut it off. A missing or half-written
+/// header yields no records and a length of `0`.
+///
+/// Returns [`PersistError::BadMagic`] / [`PersistError::UnsupportedVersion`]
+/// for a non-WAL or wrong-version file, and [`PersistError::InvalidPayload`]
+/// for a frame that passes its CRC32 but does not decode (a corrupt but
+/// checksum-valid record, which is a real defect, not a crash artifact).
+pub(crate) fn parse_log(bytes: &[u8]) -> Result<(Vec<WalRecord>, usize)> {
     if bytes.len() < 12 {
         // Missing or half-written header: nothing was ever committed.
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     if bytes[..8] != WAL_MAGIC {
         return Err(PersistError::BadMagic {
@@ -434,7 +502,7 @@ pub(crate) fn parse_records(bytes: &[u8]) -> Result<Vec<WalRecord>> {
         records.push(decode_record(body)?);
         pos = body_end;
     }
-    Ok(records)
+    Ok((records, pos))
 }
 
 fn clone_first8(bytes: &[u8]) -> [u8; 8] {

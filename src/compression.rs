@@ -31,6 +31,18 @@ pub(crate) const SCHEME_LZ4: u8 = 2;
 /// small) while capping an absurd claim from a crafted header.
 const MAX_DECOMPRESS_RATIO: usize = 4096;
 
+/// The LZ4 block format cannot expand input by more than 255 to 1: the
+/// longest run one input byte can encode is 255 bytes of match length. A
+/// claim above `compressed_len * 255` is impossible for a real LZ4 block,
+/// and since the block decoder allocates the claimed size up front, this
+/// keeps that allocation proportional to the bytes actually read.
+const LZ4_MAX_RATIO: usize = 255;
+
+/// Largest up-front buffer the streaming Zstd decoder reserves. The output
+/// grows past this only as decoded bytes actually arrive.
+#[cfg(feature = "zstd")]
+const ZSTD_INITIAL_CAPACITY: usize = 1 << 20;
+
 /// The on-disk scheme tag for a [`Compression`] setting.
 pub(crate) fn scheme_tag(scheme: Compression) -> u8 {
     match scheme {
@@ -66,7 +78,12 @@ pub(crate) fn encode(scheme: Compression, raw: &[u8]) -> Result<Cow<'_, [u8]>> {
 /// scheme's feature is not compiled in; [`PersistError::Compression`] if
 /// the codec fails or the decoded length does not match.
 pub(crate) fn decode(tag: u8, data: &[u8], uncompressed_len: usize) -> Result<Vec<u8>> {
-    if tag != SCHEME_NONE && uncompressed_len > data.len().saturating_mul(MAX_DECOMPRESS_RATIO) {
+    let max_ratio = if tag == SCHEME_LZ4 {
+        LZ4_MAX_RATIO
+    } else {
+        MAX_DECOMPRESS_RATIO
+    };
+    if tag != SCHEME_NONE && uncompressed_len > data.len().saturating_mul(max_ratio) {
         return Err(PersistError::InvalidPayload {
             reason: "declared uncompressed size exceeds the decompression-ratio guard",
         });
@@ -105,11 +122,31 @@ fn encode_zstd(_raw: &[u8], _level: i32) -> Result<Cow<'_, [u8]>> {
     })
 }
 
+/// Stream-decode a Zstd frame, stopping one byte past the recorded length.
+///
+/// A frame can expand far beyond its recorded length, so the decoder never
+/// runs to completion on its own: output is capped at
+/// `uncompressed_len + 1` bytes (the extra byte detects a frame that is
+/// longer than recorded), and the buffer grows only as bytes arrive.
 #[cfg(feature = "zstd")]
 fn decode_zstd(data: &[u8], uncompressed_len: usize) -> Result<Vec<u8>> {
-    let out = zstd::decode_all(data).map_err(|_| PersistError::Compression {
-        reason: "zstd decompression failed",
-    })?;
+    use std::io::Read;
+
+    let decoder =
+        zstd::stream::read::Decoder::with_buffer(data).map_err(|_| PersistError::Compression {
+            reason: "zstd decompression failed",
+        })?;
+    let limit = u64::try_from(uncompressed_len)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut out = Vec::with_capacity(uncompressed_len.min(ZSTD_INITIAL_CAPACITY));
+    let _read =
+        decoder
+            .take(limit)
+            .read_to_end(&mut out)
+            .map_err(|_| PersistError::Compression {
+                reason: "zstd decompression failed",
+            })?;
     if out.len() != uncompressed_len {
         return Err(PersistError::Compression {
             reason: "zstd decompressed length does not match the recorded length",
@@ -204,6 +241,42 @@ mod tests {
         let encoded = encode(Compression::None, raw).unwrap();
         assert_eq!(&*encoded, raw);
         assert_eq!(decode(SCHEME_NONE, raw, raw.len()).unwrap(), raw);
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn lz4_claim_beyond_the_block_format_limit_is_rejected_before_allocating() {
+        // 300x is inside the generic ratio guard but impossible for an LZ4
+        // block, whose decoder would reserve the whole claim up front.
+        let encoded = encode(Compression::Lz4, &[0u8; 4096]).unwrap();
+        let claim = encoded.len() * 300;
+        assert!(matches!(
+            decode(SCHEME_LZ4, &encoded, claim),
+            Err(PersistError::InvalidPayload { .. })
+        ));
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn lz4_highly_compressible_payload_still_round_trips() {
+        let raw = vec![0u8; 1 << 20];
+        let encoded = encode(Compression::Lz4, &raw).unwrap();
+        assert_eq!(decode(SCHEME_LZ4, &encoded, raw.len()).unwrap(), raw);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_frame_longer_than_recorded_is_rejected() {
+        let raw = vec![7u8; 10_000];
+        let encoded = encode(Compression::Zstd { level: 3 }, &raw).unwrap();
+        assert!(matches!(
+            decode(SCHEME_ZSTD, &encoded, 100),
+            Err(PersistError::Compression { .. })
+        ));
+        assert!(matches!(
+            decode(SCHEME_ZSTD, &encoded, 10_001),
+            Err(PersistError::Compression { .. })
+        ));
     }
 
     #[cfg(feature = "lz4")]
